@@ -64,7 +64,6 @@ namespace Safira {
 		}
 
 		// Try to create poll group
-		// TODO(Yan): should be optional, though good for groups which is probably the most common use case
 		m_PollGroup = m_Interface->CreatePollGroup();
 		if (m_PollGroup == k_HSteamNetPollGroup_Invalid)
 		{
