@@ -352,35 +352,25 @@ static void FramePresent(ImGui_ImplVulkanH_Window* wd)
 
 
 namespace Safira {
-
 #include "Walnut-Icon.embed"
 #include "WindowImages.embed"
 
-	Application::Application(const ApplicationSpecification& specification)
-		: m_Specification(specification)
-	{
-		s_Instance = this;
+    Application::Application(const ApplicationSpecification& specification)
+    : m_Specification(specification) {
+        s_Instance = this;
+        Init();
+    }
 
-		Init();
-	}
+    Application::~Application() {
+        Shutdown();
+        s_Instance = nullptr;
+    }
 
-	Application::~Application()
-	{
-		Shutdown();
+    Application& Application::Get() {
+        return *s_Instance;
+    }
 
-		s_Instance = nullptr;
-	}
-
-	Application& Application::Get()
-	{
-		return *s_Instance;
-	}
-
-	void Application::Init()
-	{
-		// Intialize logging
-		Log::Init();
-
+    void Application::Init() {
 		// Setup GLFW window
 		glfwSetErrorCallback(glfw_error_callback);
 		if (!glfwInit())
@@ -389,66 +379,65 @@ namespace Safira {
 			return;
 		}
 
-		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    	// Create window with Vulkan context
+    	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-		if (m_Specification.CustomTitlebar)
-		{
-			glfwWindowHint(GLFW_TITLEBAR, false);
+    	if (m_Specification.CustomTitlebar)
+    	{
+    		glfwWindowHint(GLFW_TITLEBAR, false);
+    	}
 
-			// NOTE(Yan): Undecorated windows are probably
-			//            also desired, so make this an option
-			// glfwWindowHint(GLFW_DECORATED, false);
-		}
+    	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
-		GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor();
-		const GLFWvidmode* videoMode = glfwGetVideoMode(primaryMonitor);
+    	GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor();
+    	const GLFWvidmode* videoMode = glfwGetVideoMode(primaryMonitor);
 
-		int monitorX, monitorY;
-		glfwGetMonitorPos(primaryMonitor, &monitorX, &monitorY);
+    	float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor()); // Valid on GLFW 3.3+ only
+    	m_WindowHandle = glfwCreateWindow((int)(m_Specification.width * main_scale),
+			(int)(m_Specification.height * main_scale),
+			m_Specification.name.c_str(),
+			nullptr, nullptr);
 
-		glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-
-		m_WindowHandle = glfwCreateWindow(m_Specification.width, m_Specification.height, m_Specification.name.c_str(), NULL, NULL);
-
-		if (m_Specification.CenterWindow)
-		{
-			glfwSetWindowPos(m_WindowHandle,
+    	int monitorX, monitorY;
+    	glfwGetMonitorPos(primaryMonitor, &monitorX, &monitorY);
+    	if (m_Specification.CenterWindow) {
+    		glfwSetWindowPos(m_WindowHandle,
 				monitorX + (videoMode->width - m_Specification.width) / 2,
 				monitorY + (videoMode->height - m_Specification.height) / 2);
 
-			glfwSetWindowAttrib(m_WindowHandle, GLFW_RESIZABLE, m_Specification.WindowResizeable ? GLFW_TRUE : GLFW_FALSE);
-		}
+    		glfwSetWindowAttrib(m_WindowHandle, GLFW_RESIZABLE, m_Specification.WindowResizeable ? GLFW_TRUE : GLFW_FALSE);
+    	}
 
-		glfwShowWindow(m_WindowHandle);
+    	if (!glfwVulkanSupported())
+    	{
+    		std::cerr << "GLFW: Vulkan not supported!\n";
+    		return;
+    	}
 
-		// Setup Vulkan
-		if (!glfwVulkanSupported())
-		{
-			std::cerr << "GLFW: Vulkan not supported!\n";
-			return;
-		}
+    	// Set icon
+    	GLFWimage icon;
+    	int channels;
+    	if (!m_Specification.IconPath.empty())
+    	{
+    		std::string iconPathStr = m_Specification.IconPath.string();
+    		icon.pixels = stbi_load(iconPathStr.c_str(), &icon.width, &icon.height, &channels, 4);
+    		glfwSetWindowIcon(m_WindowHandle, 1, &icon);
+    		stbi_image_free(icon.pixels);
+    	}
 
-		// Set icon
-		GLFWimage icon;
-		int channels;
-		if (!m_Specification.IconPath.empty())
-		{
-			std::string iconPathStr = m_Specification.IconPath.string();
-			icon.pixels = stbi_load(iconPathStr.c_str(), &icon.width, &icon.height, &channels, 4);
-			glfwSetWindowIcon(m_WindowHandle, 1, &icon);
-			stbi_image_free(icon.pixels);
-		}
-
-		glfwSetWindowUserPointer(m_WindowHandle, this);
-		glfwSetTitlebarHitTestCallback(m_WindowHandle, [](GLFWwindow* window, int x, int y, int* hit)
+    	glfwSetWindowUserPointer(m_WindowHandle, this);
+    	glfwSetTitlebarHitTestCallback(m_WindowHandle, [](GLFWwindow* window, int x, int y, int* hit)
 		{
 			Application* app = (Application*)glfwGetWindowUserPointer(window);
 			*hit = app->IsTitleBarHovered();
 		});
 
-		uint32_t extensions_count = 0;
-		const char** extensions = glfwGetRequiredInstanceExtensions(&extensions_count);
-		SetupVulkan(extensions, extensions_count);
+    	ImVector<const char*> extensions;
+    	uint32_t extensions_count = 0;
+    	const char** glfw_extensions = glfwGetRequiredInstanceExtensions(&extensions_count);
+    	for (uint32_t i = 0; i < extensions_count; i++)
+    		extensions.push_back(glfw_extensions[i]);
+    	SetupVulkan(extensions);
 
 		// Create Window Surface
 		VkSurfaceKHR surface;
@@ -464,170 +453,131 @@ namespace Safira {
 		s_AllocatedCommandBuffers.resize(wd->ImageCount);
 		s_ResourceFreeQueue.resize(wd->ImageCount);
 
-		// Setup Dear ImGui context
-		IMGUI_CHECKVERSION();
-		ImGui::CreateContext();
-		ImGuiIO& io = ImGui::GetIO(); (void)io;
-		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable Keyboard Controls
-		//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
-		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
-		//io.ConfigViewportsNoAutoMerge = true;
-		//io.ConfigViewportsNoTaskBarIcon = true;
+    	// Setup Dear ImGui context
+    	IMGUI_CHECKVERSION();
+    	ImGui::CreateContext();
+    	ImGuiIO& io = ImGui::GetIO(); (void)io;
+    	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 
-		// Theme colors
-		UI::SetSafiraTheme();
+    	// Theme colors
+    	UI::SetSafiraTheme();
 
-		// Style
-		ImGuiStyle& style = ImGui::GetStyle();
-		style.WindowPadding = ImVec2(10.0f, 10.0f);
-		style.FramePadding = ImVec2(8.0f, 6.0f);
-		style.ItemSpacing = ImVec2(6.0f, 6.0f);
-		style.ChildRounding = 6.0f;
-		style.PopupRounding = 6.0f;
-		style.FrameRounding = 6.0f;
-		style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+    	// Style
+    	ImGuiStyle& style = ImGui::GetStyle();
+    	style.WindowPadding = ImVec2(10.0f, 10.0f);
+    	style.FramePadding = ImVec2(8.0f, 6.0f);
+    	style.ItemSpacing = ImVec2(6.0f, 6.0f);
+    	style.ChildRounding = 6.0f;
+    	style.PopupRounding = 6.0f;
+    	style.FrameRounding = 6.0f;
+    	style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
 
-		// When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
-		if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-		{
-			style.WindowRounding = 0.0f;
-			style.Colors[ImGuiCol_WindowBg].w = 1.0f;
-		}
+		// Setup Dear ImGui style
+		//ImGui::StyleColorsDark();
+		//ImGui::StyleColorsClassic();
 
-		// Setup Platform/Renderer backends
-		ImGui_ImplGlfw_InitForVulkan(m_WindowHandle, true);
-		ImGui_ImplVulkan_InitInfo init_info = {};
-		init_info.Instance = g_Instance;
-		init_info.PhysicalDevice = g_PhysicalDevice;
-		init_info.Device = g_Device;
-		init_info.QueueFamily = g_QueueFamily;
-		init_info.Queue = g_Queue;
-		init_info.PipelineCache = g_PipelineCache;
-		init_info.DescriptorPool = g_DescriptorPool;
-		init_info.Subpass = 0;
-		init_info.MinImageCount = g_MinImageCount;
-		init_info.ImageCount = wd->ImageCount;
-		init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-		init_info.Allocator = g_Allocator;
-		init_info.CheckVkResultFn = check_vk_result;
-		ImGui_ImplVulkan_Init(&init_info, wd->RenderPass);
+    	// Setup scaling
+    	style.ScaleAllSizes(main_scale);        // Bake a fixed style scale. (until we have a solution for dynamic style scaling, changing this requires resetting Style + calling this again)
+    	style.FontScaleDpi = main_scale;        // Set initial font scale. (in docking branch: using io.ConfigDpiScaleFonts=true automatically overrides this for every window depending on the current monitor)
 
-		// Load default font
-		ImFontConfig fontConfig;
-		fontConfig.FontDataOwnedByAtlas = false;
-		ImFont* robotoFont = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoRegular, sizeof(g_RobotoRegular), 20.0f, &fontConfig);
-		s_Fonts["Default"] = robotoFont;
-		s_Fonts["Bold"] = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoBold, sizeof(g_RobotoBold), 20.0f, &fontConfig);
-		s_Fonts["Italic"] = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoItalic, sizeof(g_RobotoItalic), 20.0f, &fontConfig);
-		io.FontDefault = robotoFont;
+    	// Setup Platform/Renderer backends
+    	ImGui_ImplGlfw_InitForVulkan(m_WindowHandle, true);
+    	ImGui_ImplVulkan_InitInfo init_info = {};
+    	//init_info.ApiVersion = VK_API_VERSION_1_3;              // Pass in your value of VkApplicationInfo::apiVersion, otherwise will default to header version.
+    	init_info.Instance = g_Instance;
+    	init_info.PhysicalDevice = g_PhysicalDevice;
+    	init_info.Device = g_Device;
+    	init_info.QueueFamily = g_QueueFamily;
+    	init_info.Queue = g_Queue;
+    	init_info.PipelineCache = g_PipelineCache;
+    	init_info.DescriptorPool = g_DescriptorPool;
+    	init_info.MinImageCount = g_MinImageCount;
+    	init_info.ImageCount = wd->ImageCount;
+    	init_info.Allocator = g_Allocator;
+    	init_info.PipelineInfoMain.RenderPass = wd->RenderPass;
+    	init_info.PipelineInfoMain.Subpass = 0;
+    	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    	init_info.CheckVkResultFn = check_vk_result;
+    	ImGui_ImplVulkan_Init(&init_info);
 
-		// Upload Fonts
-		{
-			// Use any command queue
-			VkCommandPool command_pool = wd->Frames[wd->FrameIndex].CommandPool;
-			VkCommandBuffer command_buffer = wd->Frames[wd->FrameIndex].CommandBuffer;
+    	// Load default font
+    	ImFontConfig fontConfig;
+    	fontConfig.FontDataOwnedByAtlas = false;
+    	ImFont* robotoFont = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoRegular, sizeof(g_RobotoRegular), 20.0f, &fontConfig);
+    	s_Fonts["Default"] = robotoFont;
+    	s_Fonts["Bold"] = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoBold, sizeof(g_RobotoBold), 20.0f, &fontConfig);
+    	s_Fonts["Italic"] = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoItalic, sizeof(g_RobotoItalic), 20.0f, &fontConfig);
+    	io.FontDefault = robotoFont;
 
-			err = vkResetCommandPool(g_Device, command_pool, 0);
-			check_vk_result(err);
-			VkCommandBufferBeginInfo begin_info = {};
-			begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			begin_info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-			err = vkBeginCommandBuffer(command_buffer, &begin_info);
-			check_vk_result(err);
-
-			ImGui_ImplVulkan_CreateFontsTexture(command_buffer);
-
-			VkSubmitInfo end_info = {};
-			end_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			end_info.commandBufferCount = 1;
-			end_info.pCommandBuffers = &command_buffer;
-			err = vkEndCommandBuffer(command_buffer);
-			check_vk_result(err);
-			err = vkQueueSubmit(g_Queue, 1, &end_info, VK_NULL_HANDLE);
-			check_vk_result(err);
-
-			err = vkDeviceWaitIdle(g_Device);
-			check_vk_result(err);
-			ImGui_ImplVulkan_DestroyFontUploadObjects();
-		}
-
-		// Load images
-		{
+    	// Load images
+	    {
 			uint32_t w, h;
 			void* data = Image::Decode(g_WalnutIcon, sizeof(g_WalnutIcon), w, h);
-			m_AppHeaderIcon = std::make_shared<Safira::Image>(w, h, ImageFormat::RGBA, data);
+			m_AppHeaderIcon = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
 			free(data);
-		}
-		{
+	    }
+	    {
 			uint32_t w, h;
 			void* data = Image::Decode(g_WindowMinimizeIcon, sizeof(g_WindowMinimizeIcon), w, h);
-			m_IconMinimize = std::make_shared<Safira::Image>(w, h, ImageFormat::RGBA, data);
+			m_IconMinimize = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
 			free(data);
-		}
-		{
+	    }
+	    {
 			uint32_t w, h;
 			void* data = Image::Decode(g_WindowMaximizeIcon, sizeof(g_WindowMaximizeIcon), w, h);
-			m_IconMaximize = std::make_shared<Safira::Image>(w, h, ImageFormat::RGBA, data);
+			m_IconMaximize = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
 			free(data);
-		}
-		{
+	    }
+	    {
 			uint32_t w, h;
 			void* data = Image::Decode(g_WindowRestoreIcon, sizeof(g_WindowRestoreIcon), w, h);
-			m_IconRestore = std::make_shared<Safira::Image>(w, h, ImageFormat::RGBA, data);
+			m_IconRestore = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
 			free(data);
-		}
-		{
+	    }
+	    {
 			uint32_t w, h;
 			void* data = Image::Decode(g_WindowCloseIcon, sizeof(g_WindowCloseIcon), w, h);
-			m_IconClose = std::make_shared<Safira::Image>(w, h, ImageFormat::RGBA, data);
+			m_IconClose = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
 			free(data);
-		}
-
+	    }
 	}
 
-	void Application::Shutdown()
-	{
-		for (auto& layer : m_LayerStack)
-			layer->OnDetach();
+	void Application::Shutdown() {
+    	for (const auto& layer : m_LayerStack)
+    		layer->OnDetach();
 
-		m_LayerStack.clear();
+    	m_LayerStack.clear();
 
-		// Release resources
-		// NOTE(Yan): to avoid doing this manually, we shouldn't
-		//            store resources in this Application class
-		m_AppHeaderIcon.reset();
-		m_IconClose.reset();
-		m_IconMinimize.reset();
-		m_IconMaximize.reset();
-		m_IconRestore.reset();
+    	// Release resources
+    	m_AppHeaderIcon.reset();
+    	m_IconClose.reset();
+    	m_IconMinimize.reset();
+    	m_IconMaximize.reset();
+    	m_IconRestore.reset();
 
-		// Cleanup
-		VkResult err = vkDeviceWaitIdle(g_Device);
-		check_vk_result(err);
+    	// Cleanup
+    	const VkResult err = vkDeviceWaitIdle(g_Device);
+    	check_vk_result(err);
 
-		// Free resources in queue
-		for (auto& queue : s_ResourceFreeQueue)
-		{
-			for (auto& func : queue)
-				func();
-		}
-		s_ResourceFreeQueue.clear();
+    	// Free resources in queue
+    	for (auto& queue : s_ResourceFreeQueue) {
+    		for (auto& func : queue)
+    			func();
+    	}
+    	s_ResourceFreeQueue.clear();
 
-		ImGui_ImplVulkan_Shutdown();
-		ImGui_ImplGlfw_Shutdown();
-		ImGui::DestroyContext();
+    	ImGui_ImplVulkan_Shutdown();
+    	ImGui_ImplGlfw_Shutdown();
+    	ImGui::DestroyContext();
 
-		CleanupVulkanWindow();
-		CleanupVulkan();
+    	CleanupVulkanWindow(&g_MainWindowData);
+    	CleanupVulkan();
 
-		glfwDestroyWindow(m_WindowHandle);
-		glfwTerminate();
+    	glfwDestroyWindow(m_WindowHandle);
+    	glfwTerminate();
 
-		g_ApplicationRunning = false;
-
-		Log::Shutdown();
-	}
+    	g_ApplicationRunning = false;
+    }
 
 	void Application::UI_DrawTitlebar(float& outTitlebarHeight)
 	{
@@ -656,12 +606,12 @@ namespace Safira {
 			fgDrawList->AddImage(m_AppHeaderIcon->GetDescriptorSet(), logoRectStart, logoRectMax);
 		}
 
-		ImGui::BeginHorizontal("Titlebar", { ImGui::GetWindowWidth() - windowPadding.y * 2.0f, ImGui::GetFrameHeightWithSpacing() });
+		//ImGui::BeginHorizontal("Titlebar", { ImGui::GetWindowWidth() - windowPadding.y * 2.0f, ImGui::GetFrameHeightWithSpacing() });
 
 		static float moveOffsetX;
 		static float moveOffsetY;
 		const float w = ImGui::GetContentRegionAvail().x;
-		const float buttonsAreaWidth = 94;
+		constexpr float buttonsAreaWidth = 94;
 
 		// Title bar drag area
 		// On Windows we hook into the GLFW win32 window internals
@@ -682,9 +632,8 @@ namespace Safira {
 		// Draw Menubar
 		if (m_MenubarCallback)
 		{
-			ImGui::SuspendLayout();
 			{
-				ImGui::SetItemAllowOverlap();
+				ImGui::SetNextItemAllowOverlap();
 				const float logoHorizontalOffset = 16.0f * 2.0f + 48.0f + windowPadding.x;
 				ImGui::SetCursorPos(ImVec2(logoHorizontalOffset, 6.0f + titlebarVerticalOffset));
 				UI_DrawMenubar();
@@ -692,8 +641,6 @@ namespace Safira {
 				if (ImGui::IsItemHovered())
 					m_TitleBarHovered = false;
 			}
-
-			ImGui::ResumeLayout();
 		}
 
 		{
@@ -714,7 +661,7 @@ namespace Safira {
 
 		// Minimize Button
 
-		ImGui::Spring();
+		Spring();
 		UI::ShiftCursorY(8.0f);
 		{
 			const int iconWidth = m_IconMinimize->GetWidth();
@@ -734,7 +681,7 @@ namespace Safira {
 
 
 		// Maximize Button
-		ImGui::Spring(-1.0f, 17.0f);
+		Spring(-1.0f, 17.0f);
 		UI::ShiftCursorY(8.0f);
 		{
 			const int iconWidth = m_IconMaximize->GetWidth();
@@ -757,7 +704,7 @@ namespace Safira {
 		}
 
 		// Close Button
-		ImGui::Spring(-1.0f, 15.0f);
+		Spring(-1.0f, 15.0f);
 		UI::ShiftCursorY(8.0f);
 		{
 			const int iconWidth = m_IconClose->GetWidth();
@@ -768,8 +715,8 @@ namespace Safira {
 			UI::DrawButtonImage(m_IconClose, UI::Colors::Theme::text, UI::Colors::ColorWithMultipliedValue(UI::Colors::Theme::text, 1.4f), buttonColP);
 		}
 
-		ImGui::Spring(-1.0f, 18.0f);
-		ImGui::EndHorizontal();
+		Spring(-1.0f, 18.0f);
+		//ImGui::EndHorizontal();
 
 		outTitlebarHeight = titlebarHeight;
 	}
@@ -803,8 +750,7 @@ namespace Safira {
 		}
 	}
 
-	void Application::Run()
-	{
+	void Application::Run() {
 		m_Running = true;
 
 		ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
@@ -825,8 +771,7 @@ namespace Safira {
 				std::scoped_lock<std::mutex> lock(m_EventQueueMutex);
 
 				// Process custom event queue
-				while (m_EventQueue.size() > 0)
-				{
+				while (!m_EventQueue.empty()) {
 					auto& func = m_EventQueue.front();
 					func();
 					m_EventQueue.pop();
@@ -837,22 +782,19 @@ namespace Safira {
 				layer->OnUpdate(m_TimeStep);
 
 			// Resize swap chain?
-			if (g_SwapChainRebuild)
+			int fb_width, fb_height;
+			glfwGetFramebufferSize(m_WindowHandle, &fb_width, &fb_height);
+			if (fb_width > 0 && fb_height > 0 && (g_SwapChainRebuild || g_MainWindowData.Width != fb_width || g_MainWindowData.Height != fb_height))
 			{
-				int width, height;
-				glfwGetFramebufferSize(m_WindowHandle, &width, &height);
-				if (width > 0 && height > 0)
-				{
-					ImGui_ImplVulkan_SetMinImageCount(g_MinImageCount);
-					ImGui_ImplVulkanH_CreateOrResizeWindow(g_Instance, g_PhysicalDevice, g_Device, &g_MainWindowData, g_QueueFamily, g_Allocator, width, height, g_MinImageCount);
-					g_MainWindowData.FrameIndex = 0;
-
-					// Clear allocated command buffers from here since entire pool is destroyed
-					s_AllocatedCommandBuffers.clear();
-					s_AllocatedCommandBuffers.resize(g_MainWindowData.ImageCount);
-
-					g_SwapChainRebuild = false;
-				}
+				ImGui_ImplVulkan_SetMinImageCount(g_MinImageCount);
+				ImGui_ImplVulkanH_CreateOrResizeWindow(g_Instance, g_PhysicalDevice, g_Device, wd, g_QueueFamily, g_Allocator, fb_width, fb_height, g_MinImageCount, 0);
+				g_MainWindowData.FrameIndex = 0;
+				g_SwapChainRebuild = false;
+			}
+			if (glfwGetWindowAttrib(m_WindowHandle, GLFW_ICONIFIED) != 0)
+			{
+				ImGui_ImplGlfw_Sleep(10);
+				continue;
 			}
 
 			// Start the Dear ImGui frame
@@ -924,27 +866,17 @@ namespace Safira {
 
 			// Rendering
 			ImGui::Render();
-			ImDrawData* main_draw_data = ImGui::GetDrawData();
-			const bool main_is_minimized = (main_draw_data->DisplaySize.x <= 0.0f || main_draw_data->DisplaySize.y <= 0.0f);
-			wd->ClearValue.color.float32[0] = clear_color.x * clear_color.w;
-			wd->ClearValue.color.float32[1] = clear_color.y * clear_color.w;
-			wd->ClearValue.color.float32[2] = clear_color.z * clear_color.w;
-			wd->ClearValue.color.float32[3] = clear_color.w;
-			if (!main_is_minimized)
-				FrameRender(wd, main_draw_data);
-
-			// Update and Render additional Platform Windows
-			if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+			ImDrawData* draw_data = ImGui::GetDrawData();
+			const bool is_minimized = (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f);
+			if (!is_minimized)
 			{
-				ImGui::UpdatePlatformWindows();
-				ImGui::RenderPlatformWindowsDefault();
-			}
-
-			// Present Main Platform Window
-			if (!main_is_minimized)
+				wd->ClearValue.color.float32[0] = clear_color.x * clear_color.w;
+				wd->ClearValue.color.float32[1] = clear_color.y * clear_color.w;
+				wd->ClearValue.color.float32[2] = clear_color.z * clear_color.w;
+				wd->ClearValue.color.float32[3] = clear_color.w;
+				FrameRender(wd, draw_data);
 				FramePresent(wd);
-			else
-				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
 
 			float time = GetTime();
 			m_FrameTime = time - m_LastFrameTime;
@@ -954,101 +886,106 @@ namespace Safira {
 
 	}
 
-	void Application::Close()
-	{
-		m_Running = false;
-	}
+	void Application::Close() {
+    	m_Running = false;
+    }
 
-	bool Application::IsMaximized() const
-	{
-		return (bool)glfwGetWindowAttrib(m_WindowHandle, GLFW_MAXIMIZED);
-	}
+	bool Application::IsMaximized() const {
+    	return (bool)glfwGetWindowAttrib(m_WindowHandle, GLFW_MAXIMIZED);
+    }
 
-	float Application::GetTime()
-	{
-		return (float)glfwGetTime();
-	}
+	float Application::GetTime() {
+    	return (float)glfwGetTime();
+    }
 
-	VkInstance Application::GetInstance()
-	{
-		return g_Instance;
-	}
+	VkInstance Application::GetInstance() {
+    	return g_Instance;
+    }
 
-	VkPhysicalDevice Application::GetPhysicalDevice()
-	{
-		return g_PhysicalDevice;
-	}
+	VkPhysicalDevice Application::GetPhysicalDevice() {
+    	return g_PhysicalDevice;
+    }
 
-	VkDevice Application::GetDevice()
-	{
-		return g_Device;
-	}
+	VkDevice Application::GetDevice() {
+    	return g_Device;
+    }
 
-	VkCommandBuffer Application::GetCommandBuffer(bool begin)
-	{
-		ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
+	VkCommandBuffer Application::GetCommandBuffer(bool begin) {
+    	ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
 
-		// Use any command queue
-		VkCommandPool command_pool = wd->Frames[wd->FrameIndex].CommandPool;
+    	// Use any command queue
+    	VkCommandPool command_pool = wd->Frames[wd->FrameIndex].CommandPool;
 
-		VkCommandBufferAllocateInfo cmdBufAllocateInfo = {};
-		cmdBufAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		cmdBufAllocateInfo.commandPool = command_pool;
-		cmdBufAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		cmdBufAllocateInfo.commandBufferCount = 1;
+    	VkCommandBufferAllocateInfo cmdBufAllocateInfo = {};
+    	cmdBufAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    	cmdBufAllocateInfo.commandPool = command_pool;
+    	cmdBufAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    	cmdBufAllocateInfo.commandBufferCount = 1;
 
-		VkCommandBuffer& command_buffer = s_AllocatedCommandBuffers[wd->FrameIndex].emplace_back();
-		auto err = vkAllocateCommandBuffers(g_Device, &cmdBufAllocateInfo, &command_buffer);
+    	VkCommandBuffer& command_buffer = s_AllocatedCommandBuffers[wd->FrameIndex].emplace_back();
+    	auto err = vkAllocateCommandBuffers(g_Device, &cmdBufAllocateInfo, &command_buffer);
 
-		VkCommandBufferBeginInfo begin_info = {};
-		begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		begin_info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		err = vkBeginCommandBuffer(command_buffer, &begin_info);
-		check_vk_result(err);
+    	VkCommandBufferBeginInfo begin_info = {};
+    	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    	begin_info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    	err = vkBeginCommandBuffer(command_buffer, &begin_info);
+    	check_vk_result(err);
 
-		return command_buffer;
-	}
+    	return command_buffer;
+    }
 
-	void Application::FlushCommandBuffer(VkCommandBuffer commandBuffer)
-	{
-		const uint64_t DEFAULT_FENCE_TIMEOUT = 100000000000;
+	void Application::FlushCommandBuffer(VkCommandBuffer commandBuffer) {
+    	constexpr uint64_t DEFAULT_FENCE_TIMEOUT = 100000000000;
 
-		VkSubmitInfo end_info = {};
-		end_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		end_info.commandBufferCount = 1;
-		end_info.pCommandBuffers = &commandBuffer;
-		auto err = vkEndCommandBuffer(commandBuffer);
-		check_vk_result(err);
+    	VkSubmitInfo end_info = {};
+    	end_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    	end_info.commandBufferCount = 1;
+    	end_info.pCommandBuffers = &commandBuffer;
+    	auto err = vkEndCommandBuffer(commandBuffer);
+    	check_vk_result(err);
 
-		// Create fence to ensure that the command buffer has finished executing
-		VkFenceCreateInfo fenceCreateInfo = {};
-		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		fenceCreateInfo.flags = 0;
-		VkFence fence;
-		err = vkCreateFence(g_Device, &fenceCreateInfo, nullptr, &fence);
-		check_vk_result(err);
+    	// Create fence to ensure that the command buffer has finished executing
+    	VkFenceCreateInfo fenceCreateInfo = {};
+    	fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    	fenceCreateInfo.flags = 0;
+    	VkFence fence;
+    	err = vkCreateFence(g_Device, &fenceCreateInfo, nullptr, &fence);
+    	check_vk_result(err);
 
-		err = vkQueueSubmit(g_Queue, 1, &end_info, fence);
-		check_vk_result(err);
+    	err = vkQueueSubmit(g_Queue, 1, &end_info, fence);
+    	check_vk_result(err);
 
-		err = vkWaitForFences(g_Device, 1, &fence, VK_TRUE, DEFAULT_FENCE_TIMEOUT);
-		check_vk_result(err);
+    	err = vkWaitForFences(g_Device, 1, &fence, VK_TRUE, DEFAULT_FENCE_TIMEOUT);
+    	check_vk_result(err);
 
-		vkDestroyFence(g_Device, fence, nullptr);
-	}
+    	vkDestroyFence(g_Device, fence, nullptr);
+    }
 
+	void Application::SubmitResourceFree(std::function<void()>&& func) {
+    	s_ResourceFreeQueue[s_CurrentFrameIndex].emplace_back(func);
+    }
 
-	void Application::SubmitResourceFree(std::function<void()>&& func)
-	{
-		s_ResourceFreeQueue[s_CurrentFrameIndex].emplace_back(func);
-	}
+	ImFont* Application::GetFont(const std::string& name) {
+    	if (!s_Fonts.contains(name))
+    		return nullptr;
 
-	ImFont* Application::GetFont(const std::string& name)
-	{
-		if (!s_Fonts.contains(name))
-			return nullptr;
+    	return s_Fonts.at(name);
+    }
 
-		return s_Fonts.at(name);
-	}
+	void Application::Spring(float weight, float spacing) {
+    	if (weight < 0.0f) {
+    		const float pos_x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - spacing;
+    		ImGui::SameLine(pos_x);
+    	} else {
+    		ImGui::Dummy(ImVec2(spacing, 0.0f));
+    		ImGui::SameLine();
+    	}
+    }
 
+	void Application::Spring() {
+	    if (const float x = ImGui::GetContentRegionAvail().x; x > 0.0f) {
+    		ImGui::Dummy(ImVec2(x, 0.0f));
+    		ImGui::SameLine();
+    	}
+    }
 }

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/GameNetworkingSockets" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/gns-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/gns-src/src/external/abseil" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/gns-src/src/external/picojson" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/gns-src/src/external/webrtc" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/spdlog-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/yaml-cpp-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/glm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/imgui" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/spdlog" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/yaml-cpp" vcs="Git" />
+  </component>
+</project>
