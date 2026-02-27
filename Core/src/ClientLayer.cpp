@@ -1,17 +1,12 @@
 #include "ClientLayer.h"
-
 #include "ServerPacket.h"
-
 #include "Application.h"
 #include "UI.h"
 #include "BufferStream.h"
 #include "NetworkingUtils.h"
 #include "StringUtils.h"
-
 #include "misc/cpp/imgui_stdlib.h"
-
 #include <yaml-cpp/yaml.h>
-
 #include <iostream>
 #include <fstream>
 

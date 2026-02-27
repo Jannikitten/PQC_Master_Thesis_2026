@@ -1,7 +1,7 @@
 #include "Client.h"
 #include "NetworkingUtils.h"
 #include <iostream>
-#include <include/spdlog/spdlog.h>
+#include <spdlog/spdlog.h>
 
 namespace Safira {
 

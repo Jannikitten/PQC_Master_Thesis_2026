@@ -1,7 +1,6 @@
 #ifndef PQC_MASTER_THESIS_2026_BUFFERSTREAM_H
 #define PQC_MASTER_THESIS_2026_BUFFERSTREAM_H
 
-
 #include "StreamWriter.h"
 #include "StreamReader.h"
 #include "SafiraAssert.h"

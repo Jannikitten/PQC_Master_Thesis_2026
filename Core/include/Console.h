@@ -1,7 +1,6 @@
 #ifndef PQC_MASTER_THESIS_2026_CONSOLE_H
 #define PQC_MASTER_THESIS_2026_CONSOLE_H
 
-
 #include <vector>
 #include <string>
 #include <string_view>

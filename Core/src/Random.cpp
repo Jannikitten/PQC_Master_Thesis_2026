@@ -1,7 +1,3 @@
-//
-// Created by Jannik Verdoner on 26/02/2026.
-//
-
 #include "Random.h"
 
 namespace Safira {

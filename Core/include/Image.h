@@ -1,7 +1,3 @@
-//
-// Created by Jannik Verdoner on 26/02/2026.
-//
-
 #ifndef PQC_MASTER_THESIS_2026_IMAGE_H
 #define PQC_MASTER_THESIS_2026_IMAGE_H
 

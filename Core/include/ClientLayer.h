@@ -33,7 +33,7 @@ private:
 
     std::unique_ptr<Safira::Client> m_Client;
     Safira::UI::Console m_Console{ "Chat" };
-    std::string m_ServerIP;
+    std::string m_ServerIP = "101";
     std::filesystem::path m_ConnectionDetailsFilePath = "ConnectionDetails.yaml";
 
     Safira::Buffer m_ScratchBuffer;

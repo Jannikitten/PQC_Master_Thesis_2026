@@ -415,15 +415,15 @@ namespace Safira {
     	}
 
     	// Set icon
-    	GLFWimage icon;
-    	int channels;
-    	if (!m_Specification.IconPath.empty())
-    	{
-    		std::string iconPathStr = m_Specification.IconPath.string();
-    		icon.pixels = stbi_load(iconPathStr.c_str(), &icon.width, &icon.height, &channels, 4);
-    		glfwSetWindowIcon(m_WindowHandle, 1, &icon);
-    		stbi_image_free(icon.pixels);
-    	}
+    	//GLFWimage icon;
+    	//int channels;
+    	//if (!m_Specification.IconPath.empty())
+    	//{
+    	//	std::string iconPathStr = m_Specification.IconPath.string();
+    	//	icon.pixels = stbi_load(iconPathStr.c_str(), &icon.width, &icon.height, &channels, 4);
+    	//	glfwSetWindowIcon(m_WindowHandle, 1, &icon);
+    	//	stbi_image_free(icon.pixels);
+    	//}
 
     	glfwSetWindowUserPointer(m_WindowHandle, this);
     	glfwSetTitlebarHitTestCallback(m_WindowHandle, [](GLFWwindow* window, int x, int y, int* hit)
@@ -540,6 +540,8 @@ namespace Safira {
 			m_IconClose = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
 			free(data);
 	    }
+
+    	glfwShowWindow(m_WindowHandle);
 	}
 
 	void Application::Shutdown() {
@@ -844,7 +846,7 @@ namespace Safira {
 					float titleBarHeight;
 					UI_DrawTitlebar(titleBarHeight);
 					ImGui::SetCursorPosY(titleBarHeight);
-
+					ImGui::Dummy(ImVec2(0.0f, 0.0f));
 				}
 
 				// Dockspace

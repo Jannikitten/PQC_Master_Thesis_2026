@@ -1,4 +1,4 @@
-#include "../include/Theme.h"
+#include "Theme.h"
 
 namespace Safira::UI {
 	void SetSafiraTheme() {

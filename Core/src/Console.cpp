@@ -49,6 +49,7 @@ namespace Safira::UI {
 		constexpr float TextPadding = 8.0f;
 
 		ImGui::SetCursorPosY(TextPadding);
+		ImGui::Dummy(ImVec2(0.0f, 0.0f));
 		for (auto & i : m_MessageHistory) {
 			if (!m_Filter.PassFilter(i.Message.c_str()))
 				continue;

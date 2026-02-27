@@ -107,7 +107,7 @@ namespace Safira {
         std::shared_ptr<Image> m_IconRestore;
     };
 
-    // Implemented by CLIENT
+    // Implemented by apps
     Application* CreateApplication(int argc, char** argv);
 }
 
