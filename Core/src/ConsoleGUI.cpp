@@ -1,0 +1,130 @@
+#include "ConsoleGUI.h"
+#include "ApplicationGUI.h"
+#include "misc/cpp/imgui_stdlib.h"
+
+namespace Safira::UI {
+
+	ConsoleGUI::ConsoleGUI(std::string_view title)
+		: m_Title(title) {}
+
+	void ConsoleGUI::ClearLog() {
+		m_MessageHistory.clear();
+	}
+
+	void ConsoleGUI::OnUIRender() {
+		ImGui::SetNextWindowSize(ImVec2(520, 600), ImGuiCond_FirstUseEver);
+
+		if (!ImGui::Begin(m_Title.c_str())) {
+			ImGui::End();
+			return;
+		}
+
+		// Options menu
+		if (ImGui::BeginPopup("Options")) {
+			ImGui::Checkbox("Auto-scroll", &m_AutoScroll);
+			ImGui::EndPopup();
+		}
+
+		// Options, Filter
+		if (ImGui::Button("Options"))
+			ImGui::OpenPopup("Options");
+
+		ImGui::SameLine();
+		ImGui::Text("Search");
+		ImGui::SameLine();
+		m_Filter.Draw("##search", 180);
+		ImGui::Separator();
+
+		// Reserve enough left-over height for 1 separator + 1 input text
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 10.0f));
+		const float footer_height_to_reserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+		ImGui::BeginChild("ScrollingRegion", ImVec2(0, -footer_height_to_reserve), false, ImGuiWindowFlags_HorizontalScrollbar);
+
+		if (ImGui::BeginPopupContextWindow()) {
+			if (ImGui::Selectable("Clear")) ClearLog();
+			ImGui::EndPopup();
+		}
+
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
+		constexpr float TextPadding = 8.0f;
+
+		ImGui::SetCursorPosY(TextPadding);
+		ImGui::Dummy(ImVec2(0.0f, 0.0f));
+		for (auto & i : m_MessageHistory) {
+			if (!m_Filter.PassFilter(i.Message.c_str()))
+				continue;
+
+			ImGui::SetCursorPosX(TextPadding);
+
+			// Normally you would store more information in your item than just a string.
+			// (e.g. make Items[] an array of structure, store color/type etc.)
+			ImGui::PushStyleColor(ImGuiCol_Text, ImColor(i.Color).Value);
+			ImVec4 finalColor = ImColor(i.Color).Value;
+			if (!i.Tag.empty()) {
+				ImGui::PushFont(ApplicationGUI::GetFont("Bold"));
+				ImGui::TextUnformatted(i.Tag.c_str());
+				ImGui::PopFont();
+				ImGui::SameLine(0.0f, TextPadding);
+			}
+
+			if (i.Italic)
+				ImGui::PushFont(ApplicationGUI::GetFont("Italic"));
+
+			ImGui::TextUnformatted(i.Message.c_str());
+
+			if (i.Italic)
+				ImGui::PopFont();
+
+			ImGui::PopStyleColor();
+		}
+
+		if (m_ScrollToBottom || (m_AutoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY()))
+			ImGui::SetScrollHereY(1.0f);
+
+		m_ScrollToBottom = false;
+
+		ImGui::PopStyleVar();
+		ImGui::EndChild();
+		ImGui::PopStyleVar();
+		ImGui::Separator();
+
+		// Command-line
+		static bool reclaim_focus = false;
+		ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_EnterReturnsTrue;
+
+		const float sendButtonWidth = 100.0f;
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - sendButtonWidth - TextPadding);
+		if (ImGui::InputText("##input", &m_MessageBuffer, input_text_flags)) {
+			if (m_MessageSendCallback)
+				m_MessageSendCallback(m_MessageBuffer);
+
+			// Clear InputText
+			m_MessageBuffer = "";
+			reclaim_focus = true;
+		}
+
+		// Auto-focus on window apparition
+		ImGui::SetItemDefaultFocus();
+		if (reclaim_focus) {
+			ImGui::SetKeyboardFocusHere(-1); // Auto focus previous widget
+			reclaim_focus = false;
+		}
+
+		ImGui::SameLine();
+		if (ImGui::Button("Send", ImVec2(sendButtonWidth, 0.0f))) {
+			if (m_MessageSendCallback)
+				m_MessageSendCallback(m_MessageBuffer);
+
+			// Clear InputText
+			m_MessageBuffer = "";
+			reclaim_focus = true;
+		}
+
+		ImGui::End();
+	}
+
+	void ConsoleGUI::SetMessageSendCallback(const MessageSendCallback& callback) {
+		m_MessageSendCallback = callback;
+	}
+
+}

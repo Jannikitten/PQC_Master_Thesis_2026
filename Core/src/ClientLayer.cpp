@@ -1,6 +1,6 @@
 #include "ClientLayer.h"
 #include "ServerPacket.h"
-#include "Application.h"
+#include "ApplicationGUI.h"
 #include "UI.h"
 #include "BufferStream.h"
 #include "NetworkingUtils.h"
@@ -88,7 +88,7 @@ void ClientLayer::UI_ConnectionModal() {
 		}
 
 		if (Safira::UI::ButtonCentered("Quit"))
-			Safira::Application::Get().Close();
+			Safira::ApplicationGUI::Get().Close();
 
 		if (m_Client->GetConnectionStatus() == Safira::Client::ConnectionStatus::Connected)
 		{

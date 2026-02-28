@@ -45,11 +45,11 @@ find_package(OpenSSL REQUIRED)
 # ---------------------------------------------------------
 # Includes everything in Core/ except App wrappers and Layer specific logic
 add_library(CoreLib STATIC
-        Core/src/Application.cpp
+        Core/src/ApplicationGUI.cpp
         Core/src/Image.cpp
         Core/src/Random.cpp
         Core/src/UI.cpp
-        Core/src/Console.cpp
+        Core/src/ConsoleGUI.cpp
         Core/src/Theme.cpp
         Core/src/Log.cpp
         Core/src/Input.cpp
@@ -62,6 +62,9 @@ add_library(CoreLib STATIC
         Core/src/BufferStream.cpp
         Core/src/StringUtils.cpp
         Core/src/Server.cpp
+        Core/src/ApplicationConsole.cpp
+        Core/src/Console.cpp
+        Core/include/Console.h
 )
 
 # ---------------------------------------------------------

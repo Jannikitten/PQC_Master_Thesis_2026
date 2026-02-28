@@ -1,17 +1,17 @@
-#include "Application.h"
+#include "ApplicationGUI.h"
 #include "Image.h"
 #include "ClientLayer.h"
 
 bool g_ApplicationRunning = true;
 
-Safira::Application* Safira::CreateApplication(int argc, char** argv) {
+Safira::ApplicationGUI* Safira::CreateApplication(int argc, char** argv) {
         ApplicationSpecification spec;
         spec.name = "Safira Chat Client";
         spec.IconPath = "Safira-Icon.png";
         spec.CustomTitlebar = true;
         spec.CenterWindow = true;
 
-        Application* app = new Application(spec);
+        ApplicationGUI* app = new ApplicationGUI(spec);
         std::shared_ptr<ClientLayer> clientLayer = std::make_shared<ClientLayer>();
         app->PushLayer(clientLayer);
         app->SetMenubarCallback([app, clientLayer]()

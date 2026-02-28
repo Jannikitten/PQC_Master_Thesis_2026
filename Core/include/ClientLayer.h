@@ -3,7 +3,7 @@
 
 #include "Layer.h"
 #include "Client.h"
-#include "Console.h"
+#include "ConsoleGUI.h"
 #include "UserInfo.h"
 
 #include <set>
@@ -32,7 +32,7 @@ private:
     bool LoadConnectionDetails(const std::filesystem::path& filepath);
 
     std::unique_ptr<Safira::Client> m_Client;
-    Safira::UI::Console m_Console{ "Chat" };
+    Safira::UI::ConsoleGUI m_Console{ "Chat" };
     std::string m_ServerIP = "101";
     std::filesystem::path m_ConnectionDetailsFilePath = "ConnectionDetails.yaml";
 

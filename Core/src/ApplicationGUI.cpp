@@ -1,4 +1,4 @@
-#include "Application.h"
+#include "ApplicationGUI.h"
 #include "UI.h"
 #include "Log.h"
 #include "imgui_impl_glfw.h"
@@ -61,7 +61,7 @@ static std::vector<std::vector<std::function<void()>>> s_ResourceFreeQueue;
 // and is always guaranteed to increase (eg. 0, 1, 2, 0, 1, 2)
 static uint32_t s_CurrentFrameIndex = 0;
 
-static Safira::Application* s_Instance = nullptr;
+static Safira::ApplicationGUI* s_Instance = nullptr;
 static std::unordered_map<std::string, ImFont*> s_Fonts;
 
 void check_vk_result(VkResult err) {
@@ -355,22 +355,22 @@ namespace Safira {
 #include "Walnut-Icon.embed"
 #include "WindowImages.embed"
 
-    Application::Application(const ApplicationSpecification& specification)
+    ApplicationGUI::ApplicationGUI(const ApplicationSpecification& specification)
     : m_Specification(specification) {
         s_Instance = this;
         Init();
     }
 
-    Application::~Application() {
+    ApplicationGUI::~ApplicationGUI() {
         Shutdown();
         s_Instance = nullptr;
     }
 
-    Application& Application::Get() {
+    ApplicationGUI& ApplicationGUI::Get() {
         return *s_Instance;
     }
 
-    void Application::Init() {
+    void ApplicationGUI::Init() {
 		// Setup GLFW window
 		glfwSetErrorCallback(glfw_error_callback);
 		if (!glfwInit())
@@ -428,7 +428,7 @@ namespace Safira {
     	glfwSetWindowUserPointer(m_WindowHandle, this);
     	glfwSetTitlebarHitTestCallback(m_WindowHandle, [](GLFWwindow* window, int x, int y, int* hit)
 		{
-			Application* app = (Application*)glfwGetWindowUserPointer(window);
+			ApplicationGUI* app = (ApplicationGUI*)glfwGetWindowUserPointer(window);
 			*hit = app->IsTitleBarHovered();
 		});
 
@@ -544,7 +544,7 @@ namespace Safira {
     	glfwShowWindow(m_WindowHandle);
 	}
 
-	void Application::Shutdown() {
+	void ApplicationGUI::Shutdown() {
     	for (const auto& layer : m_LayerStack)
     		layer->OnDetach();
 
@@ -581,7 +581,7 @@ namespace Safira {
     	g_ApplicationRunning = false;
     }
 
-	void Application::UI_DrawTitlebar(float& outTitlebarHeight)
+	void ApplicationGUI::UI_DrawTitlebar(float& outTitlebarHeight)
 	{
 		const float titlebarHeight = 58.0f;
 		const bool isMaximized = IsMaximized();
@@ -674,7 +674,7 @@ namespace Safira {
 				// TODO: move this stuff to a better place, like Window class
 				if (m_WindowHandle)
 				{
-					Application::Get().QueueEvent([windowHandle = m_WindowHandle]() { glfwIconifyWindow(windowHandle); });
+					ApplicationGUI::Get().QueueEvent([windowHandle = m_WindowHandle]() { glfwIconifyWindow(windowHandle); });
 				}
 			}
 
@@ -693,7 +693,7 @@ namespace Safira {
 
 			if (ImGui::InvisibleButton("Maximize", ImVec2(buttonWidth, buttonHeight)))
 			{
-				Application::Get().QueueEvent([isMaximized, windowHandle = m_WindowHandle]()
+				ApplicationGUI::Get().QueueEvent([isMaximized, windowHandle = m_WindowHandle]()
 				{
 					if (isMaximized)
 						glfwRestoreWindow(windowHandle);
@@ -712,7 +712,7 @@ namespace Safira {
 			const int iconWidth = m_IconClose->GetWidth();
 			const int iconHeight = m_IconClose->GetHeight();
 			if (ImGui::InvisibleButton("Close", ImVec2(buttonWidth, buttonHeight)))
-				Application::Get().Close();
+				ApplicationGUI::Get().Close();
 
 			UI::DrawButtonImage(m_IconClose, UI::Colors::Theme::text, UI::Colors::ColorWithMultipliedValue(UI::Colors::Theme::text, 1.4f), buttonColP);
 		}
@@ -723,7 +723,7 @@ namespace Safira {
 		outTitlebarHeight = titlebarHeight;
 	}
 
-	void Application::UI_DrawMenubar()
+	void ApplicationGUI::UI_DrawMenubar()
 	{
 		if (!m_MenubarCallback)
 			return;
@@ -752,7 +752,7 @@ namespace Safira {
 		}
 	}
 
-	void Application::Run() {
+	void ApplicationGUI::Run() {
 		m_Running = true;
 
 		ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
@@ -888,31 +888,31 @@ namespace Safira {
 
 	}
 
-	void Application::Close() {
+	void ApplicationGUI::Close() {
     	m_Running = false;
     }
 
-	bool Application::IsMaximized() const {
+	bool ApplicationGUI::IsMaximized() const {
     	return (bool)glfwGetWindowAttrib(m_WindowHandle, GLFW_MAXIMIZED);
     }
 
-	float Application::GetTime() {
+	float ApplicationGUI::GetTime() {
     	return (float)glfwGetTime();
     }
 
-	VkInstance Application::GetInstance() {
+	VkInstance ApplicationGUI::GetInstance() {
     	return g_Instance;
     }
 
-	VkPhysicalDevice Application::GetPhysicalDevice() {
+	VkPhysicalDevice ApplicationGUI::GetPhysicalDevice() {
     	return g_PhysicalDevice;
     }
 
-	VkDevice Application::GetDevice() {
+	VkDevice ApplicationGUI::GetDevice() {
     	return g_Device;
     }
 
-	VkCommandBuffer Application::GetCommandBuffer(bool begin) {
+	VkCommandBuffer ApplicationGUI::GetCommandBuffer(bool begin) {
     	ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
 
     	// Use any command queue
@@ -936,7 +936,7 @@ namespace Safira {
     	return command_buffer;
     }
 
-	void Application::FlushCommandBuffer(VkCommandBuffer commandBuffer) {
+	void ApplicationGUI::FlushCommandBuffer(VkCommandBuffer commandBuffer) {
     	constexpr uint64_t DEFAULT_FENCE_TIMEOUT = 100000000000;
 
     	VkSubmitInfo end_info = {};
@@ -963,18 +963,18 @@ namespace Safira {
     	vkDestroyFence(g_Device, fence, nullptr);
     }
 
-	void Application::SubmitResourceFree(std::function<void()>&& func) {
+	void ApplicationGUI::SubmitResourceFree(std::function<void()>&& func) {
     	s_ResourceFreeQueue[s_CurrentFrameIndex].emplace_back(func);
     }
 
-	ImFont* Application::GetFont(const std::string& name) {
+	ImFont* ApplicationGUI::GetFont(const std::string& name) {
     	if (!s_Fonts.contains(name))
     		return nullptr;
 
     	return s_Fonts.at(name);
     }
 
-	void Application::Spring(float weight, float spacing) {
+	void ApplicationGUI::Spring(float weight, float spacing) {
     	if (weight < 0.0f) {
     		const float pos_x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - spacing;
     		ImGui::SameLine(pos_x);
@@ -984,7 +984,7 @@ namespace Safira {
     	}
     }
 
-	void Application::Spring() {
+	void ApplicationGUI::Spring() {
 	    if (const float x = ImGui::GetContentRegionAvail().x; x > 0.0f) {
     		ImGui::Dummy(ImVec2(x, 0.0f));
     		ImGui::SameLine();

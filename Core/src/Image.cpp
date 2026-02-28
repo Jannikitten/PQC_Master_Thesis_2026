@@ -1,7 +1,7 @@
 #include "Image.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
-#include "Application.h"
+#include "ApplicationGUI.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -12,7 +12,7 @@ namespace Safira {
 		static uint32_t GetVulkanMemoryType(VkMemoryPropertyFlags properties, uint32_t type_bits)
 		{
 			VkPhysicalDeviceMemoryProperties prop;
-			vkGetPhysicalDeviceMemoryProperties(Application::GetPhysicalDevice(), &prop);
+			vkGetPhysicalDeviceMemoryProperties(ApplicationGUI::GetPhysicalDevice(), &prop);
 			for (uint32_t i = 0; i < prop.memoryTypeCount; i++)
 			{
 				if ((prop.memoryTypes[i].propertyFlags & properties) == properties && type_bits & (1 << i))
@@ -84,7 +84,7 @@ namespace Safira {
 
 	void Image::AllocateMemory(uint64_t size)
 	{
-		VkDevice device = Application::GetDevice();
+		VkDevice device = ApplicationGUI::GetDevice();
 
 		VkResult err;
 
@@ -157,10 +157,10 @@ namespace Safira {
 
 	void Image::Release()
 	{
-		Application::SubmitResourceFree([sampler = m_Sampler, imageView = m_ImageView, image = m_Image,
+		ApplicationGUI::SubmitResourceFree([sampler = m_Sampler, imageView = m_ImageView, image = m_Image,
 			memory = m_Memory, stagingBuffer = m_StagingBuffer, stagingBufferMemory = m_StagingBufferMemory]()
 		{
-			VkDevice device = Application::GetDevice();
+			VkDevice device = ApplicationGUI::GetDevice();
 
 			vkDestroySampler(device, sampler, nullptr);
 			vkDestroyImageView(device, imageView, nullptr);
@@ -180,7 +180,7 @@ namespace Safira {
 
 	void Image::SetData(const void* data)
 	{
-		VkDevice device = Application::GetDevice();
+		VkDevice device = ApplicationGUI::GetDevice();
 
 		size_t upload_size = m_Width * m_Height * Utils::BytesPerPixel(m_Format);
 
@@ -230,7 +230,7 @@ namespace Safira {
 
 		// Copy to Image
 		{
-			VkCommandBuffer command_buffer = Application::GetCommandBuffer(true);
+			VkCommandBuffer command_buffer = ApplicationGUI::GetCommandBuffer(true);
 
 			VkImageMemoryBarrier copy_barrier = {};
 			copy_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -267,7 +267,7 @@ namespace Safira {
 			use_barrier.subresourceRange.layerCount = 1;
 			vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &use_barrier);
 
-			Application::FlushCommandBuffer(command_buffer);
+			ApplicationGUI::FlushCommandBuffer(command_buffer);
 		}
 	}
 

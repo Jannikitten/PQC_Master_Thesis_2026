@@ -56,9 +56,9 @@ private:
 	void OnCommand(std::string_view command);
 	void SaveMessageHistoryToFile(const std::filesystem::path& filepath);
 	bool LoadMessageHistoryFromFile(const std::filesystem::path& filepath);
-private:
+
 	std::unique_ptr<Safira::Server> m_Server;
-	Safira::UI::Console m_Console{ "Server Console" };
+	Console m_Console{ "Server Console" };
 	std::vector<ChatMessage> m_MessageHistory;
 	std::filesystem::path m_MessageHistoryFilePath;
 

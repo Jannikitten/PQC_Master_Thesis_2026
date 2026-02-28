@@ -96,10 +96,11 @@ namespace Safira {
 		m_PollGroup = k_HSteamNetPollGroup_Invalid;
 	}
 
-	void Server::ConnectionStatusChangedCallback(SteamNetConnectionStatusChangedCallback_t* info) { s_Instance->OnConnectionStatusChanged(info); }
+	void Server::ConnectionStatusChangedCallback(SteamNetConnectionStatusChangedCallback_t* info) {
+		s_Instance->OnConnectionStatusChanged(info);
+	}
 
-	void Server::OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* status)
-	{
+	void Server::OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* status) {
 		// Handle connection state
 		switch (status->m_info.m_eState)
 		{

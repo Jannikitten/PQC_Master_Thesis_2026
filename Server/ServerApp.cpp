@@ -1,24 +1,14 @@
-#include "Application.h"
-#include "Image.h"
+#include "ApplicationConsole.h"
 #include "ServerLayer.h"
 
 bool g_ApplicationRunning = true;
 
-Safira::Application* Safira::CreateApplication(int argc, char** argv) {
+Safira::ApplicationConsole* Safira::CreateApplication(int argc, char** argv) {
     ApplicationSpecification spec;
-    spec.name = "Safira Chat Server 1.0";
+    spec.name = "Walnut Chat Server 1.0";
 
-    Application* app = new Application(spec);
+    ApplicationConsole* app = new ApplicationConsole(spec);
     app->PushLayer<ServerLayer>();
-    app->SetMenubarCallback([app]() {
-        if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("Exit"))
-            {
-                app->Close();
-            }
-            ImGui::EndMenu();
-        }
-    });
     return app;
 }
 

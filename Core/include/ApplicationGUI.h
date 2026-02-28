@@ -1,5 +1,5 @@
-#ifndef PQC_MASTER_THESIS_2026_APPLICATION_H
-#define PQC_MASTER_THESIS_2026_APPLICATION_H
+#ifndef PQC_MASTER_THESIS_2026_APPLICATIONGUI_H
+#define PQC_MASTER_THESIS_2026_APPLICATIONGUI_H
 
 #include <string>
 #include <vector>
@@ -30,12 +30,12 @@ namespace Safira {
         bool CenterWindow = false;
     };
 
-    class Application {
+    class ApplicationGUI {
     public:
-        explicit Application(const ApplicationSpecification& applicationSpecification = ApplicationSpecification());
-        ~Application();
+        explicit ApplicationGUI(const ApplicationSpecification& applicationSpecification = ApplicationSpecification());
+        ~ApplicationGUI();
 
-        static Application& Get();
+        static ApplicationGUI& Get();
 
         void Run();
         void SetMenubarCallback(const std::function<void()>& menubarCallback) { m_MenubarCallback = menubarCallback; }
@@ -108,7 +108,7 @@ namespace Safira {
     };
 
     // Implemented by apps
-    Application* CreateApplication(int argc, char** argv);
+    ApplicationGUI* CreateApplication(int argc, char** argv);
 }
 
-#endif //PQC_MASTER_THESIS_2026_APPLICATION_H
+#endif //PQC_MASTER_THESIS_2026_APPLICATIONGUI_H
