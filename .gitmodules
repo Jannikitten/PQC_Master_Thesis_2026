@@ -13,4 +13,4 @@
 	url = https://github.com/jbeder/yaml-cpp.git
 [submodule "wolfssl"]
 	path = wolfssl
-	url = https://github.com/wolfSSL/wolfssl.git
+	url = https://github.com/Jannikitten/wolfssl.git
