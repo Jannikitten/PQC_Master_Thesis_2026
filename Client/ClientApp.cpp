@@ -8,6 +8,8 @@ Safira::ApplicationGUI* Safira::CreateApplication(int argc, char** argv) {
         ApplicationSpecification spec;
         spec.name = "Safira Chat Client";
         spec.IconPath = "Safira-Icon.png";
+        spec.width = 650;
+        spec.height = 700;
         spec.CustomTitlebar = true;
         spec.CenterWindow = true;
 

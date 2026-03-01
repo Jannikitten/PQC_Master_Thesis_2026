@@ -195,6 +195,4 @@ namespace Safira {
 		std::cout << message << std::endl;
 		m_Running = false;
 	}
-
-
 }

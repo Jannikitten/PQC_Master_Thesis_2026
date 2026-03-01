@@ -36,7 +36,7 @@ if(TARGET GameNetworkingSockets)
         )
 endif()
 
-# 6-7. Find Vulkan & OpenSSL
+# 6-7. Find Vulkan, OpenSSL & WolfSSL
 find_package(Vulkan REQUIRED)
 find_package(OpenSSL REQUIRED)
 
