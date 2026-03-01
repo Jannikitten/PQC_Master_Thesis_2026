@@ -1,107 +1,103 @@
-#ifndef PQC_MASTER_THESIS_2026_SERVER_H
-#define PQC_MASTER_THESIS_2026_SERVER_H
-
-
-#include "Buffer.h"
-
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
-#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
-#include <steam/steam_api.h>
-#endif
+#pragma once
+#include "Common.h"
 
 #include <string>
-#include <map>
 #include <thread>
+#include <atomic>
+#include <mutex>
 #include <functional>
+#include <unordered_map>
+#include <vector>
+#include <../Core/include/Buffer.h>
+
+#include <netinet/in.h>          // sockaddr_in
+#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
 
 namespace Safira {
 
-	using ClientID = HSteamNetConnection;
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-client state held by the server
+// ─────────────────────────────────────────────────────────────────────────────
+struct ClientInfo {
+    ClientID    ID   = 0;
+    sockaddr_in Addr {};                   // remote address (ip + port)
+    std::string AddressStr;                // "a.b.c.d:port" for logging
 
-	struct ClientInfo
-	{
-		ClientID ID;
-		std::string ConnectionDesc;
-	};
+    WOLFSSL*             SSL            = nullptr;
+    std::vector<uint8_t> EncryptedBuffer;  // raw UDP bytes waiting to be read by wolfSSL
+};
 
-	class Server
-	{
-	public:
-		using DataReceivedCallback = std::function<void(const ClientInfo&, const Buffer)>;
-		using ClientConnectedCallback = std::function<void(const ClientInfo&)>;
-		using ClientDisconnectedCallback = std::function<void(const ClientInfo&)>;
-	public:
-		Server(int port);
-		~Server();
+// ─────────────────────────────────────────────────────────────────────────────
+// Server
+// ─────────────────────────────────────────────────────────────────────────────
+class Server {
+public:
+    using DataReceivedCallback       = std::function<void(ClientInfo&, Buffer)>;
+    using ClientConnectedCallback    = std::function<void(ClientInfo&)>;
+    using ClientDisconnectedCallback = std::function<void(ClientInfo&)>;
 
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		// Start and Stop the server
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		void Start();
-		void Stop();
+    explicit Server(int port);
+    ~Server();
 
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		// Set callbacks for server events
-		// These callbacks will be called from the server thread
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		void SetDataReceivedCallback(const DataReceivedCallback& function);
-		void SetClientConnectedCallback(const ClientConnectedCallback& function);
-		void SetClientDisconnectedCallback(const ClientDisconnectedCallback& function);
+    // Non-copyable / non-movable
+    Server(const Server&)            = delete;
+    Server& operator=(const Server&) = delete;
 
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		// Send Data
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		void SendBufferToClient(ClientID clientID, Buffer buffer, bool reliable = true);
-		void SendBufferToAllClients(Buffer buffer, ClientID excludeClientID = 0, bool reliable = true);
+    void Start();
+    void Stop();
+    bool IsRunning() const { return m_Running; }
 
-		void SendStringToClient(ClientID clientID, const std::string& string, bool reliable = true);
-		void SendStringToAllClients(const std::string& string, ClientID excludeClientID = 0, bool reliable = true);
+    // ── Send helpers ────────────────────────────────────────────────────────
+    // `reliable` is kept for API compatibility but DTLS is always
+    // unreliable at the transport layer — use application-level sequencing
+    // if you need reliability.
+    void SendBufferToClient    (ClientID, Buffer, bool reliable = true);
+    void SendBufferToAllClients(Buffer,   ClientID exclude = 0, bool reliable = true);
+    void SendStringToClient    (ClientID, const std::string&, bool reliable = true);
+    void SendStringToAllClients(const std::string&, ClientID exclude = 0, bool reliable = true);
 
-		template<typename T>
-		void SendDataToClient(ClientID clientID, const T& data, bool reliable = true)
-		{
-			SendBufferToClient(clientID, Buffer(&data, sizeof(T)), reliable);
-		}
+    void KickClient(ClientID);
 
-		template<typename T>
-		void SendDataToAllClients(const T& data, ClientID excludeClientID = 0, bool reliable = true)
-		{
-			SendBufferToAllClients(Buffer(&data, sizeof(T)), excludeClientID, reliable);
-		}
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // ── Callbacks ───────────────────────────────────────────────────────────
+    void SetDataReceivedCallback      (const DataReceivedCallback&);
+    void SetClientConnectedCallback   (const ClientConnectedCallback&);
+    void SetClientDisconnectedCallback(const ClientDisconnectedCallback&);
 
-		void KickClient(ClientID clientID);
+private:
+    // Network thread entry point
+    void NetworkThreadFunc();
 
-		bool IsRunning() const { return m_Running; }
-		const std::map<HSteamNetConnection, ClientInfo>& GetConnectedClients() const { return m_ConnectedClients; }
-	private:
-		void NetworkThreadFunc(); // Server thread
+    // Packet dispatch: called for every UDP datagram that arrives
+    void DispatchPacket(const sockaddr_in& from, const uint8_t* data, int len);
 
-		static void ConnectionStatusChangedCallback(SteamNetConnectionStatusChangedCallback_t* info);
-		void OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
+    // Drive the wolfSSL engine for one client (accept + read loop)
+    void DriveClient(ClientInfo& client);
 
-		// Server functionality
-		void PollIncomingMessages();
-		void SetClientNick(HSteamNetConnection hConn, const char* nick);
-		void PollConnectionStateChanges();
+    // Remove a client cleanly, calling the disconnect callback
+    void RemoveClient(ClientID id);
 
-		void OnFatalError(const std::string& message);
-	private:
-		std::thread m_NetworkThread;
-		DataReceivedCallback m_DataReceivedCallback;
-		ClientConnectedCallback m_ClientConnectedCallback;
-		ClientDisconnectedCallback m_ClientDisconnectedCallback;
+    void OnFatalError(const std::string& msg);
 
-		int m_Port = 0;
-		bool m_Running = false;
-		std::map<HSteamNetConnection, ClientInfo> m_ConnectedClients;
+    // ── wolfSSL custom I/O callbacks (static so they match the C signature) ─
+    static int IORecv(WOLFSSL*, char* buf, int sz, void* ctx);
+    static int IOSend(WOLFSSL*, char* buf, int sz, void* ctx);
 
-		ISteamNetworkingSockets* m_Interface = nullptr;
-		HSteamListenSocket m_ListenSocket = 0u;
-		HSteamNetPollGroup m_PollGroup = 0u;
-	};
+    // ── State ────────────────────────────────────────────────────────────────
+    int               m_Port   = 0;
+    int               m_Socket = -1;
+    std::atomic<bool> m_Running{false};
+    std::thread       m_NetworkThread;
+    int               m_kDtlsMtu = 1400;
 
-}
+    WOLFSSL_CTX* m_CTX = nullptr;
 
-#endif //PQC_MASTER_THESIS_2026_SERVER_H
+    // All client access happens on the network thread; no extra lock needed.
+    std::unordered_map<ClientID, ClientInfo> m_Clients;
+
+    DataReceivedCallback       m_DataReceivedCallback;
+    ClientConnectedCallback    m_ClientConnectedCallback;
+    ClientDisconnectedCallback m_ClientDisconnectedCallback;
+};
+
+} // namespace Safira

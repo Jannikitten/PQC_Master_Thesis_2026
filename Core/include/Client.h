@@ -1,93 +1,81 @@
-#ifndef PQC_MASTER_THESIS_2026_CLIENT_H
-#define PQC_MASTER_THESIS_2026_CLIENT_H
-
-#include "Buffer.h"
-
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
-#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
-#include <steam/steam_api.h>
-#endif
+#pragma once
+#include "Common.h"
 
 #include <string>
-#include <map>
 #include <thread>
+#include <atomic>
 #include <functional>
+#include <vector>
+#include <../Core/include/Buffer.h>
+#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
 
 namespace Safira {
 
-	class Client {
-	public:
-		enum class ConnectionStatus
-		{
-			Disconnected = 0, Connected, Connecting, FailedToConnect
-		};
-	public:
-		using DataReceivedCallback = std::function<void(const Buffer)>;
-		using ServerConnectedCallback = std::function<void()>;
-		using ServerDisconnectedCallback = std::function<void()>;
-	public:
-		Client() = default;
-		~Client();
+enum class ConnectionStatus {
+    Disconnected,
+    Connecting,
+    Connected,
+    FailedToConnect,
+};
 
-		void ConnectToServer(const std::string& serverAddress);
-		void Disconnect();
+class Client {
+public:
+    using DataReceivedCallback      = std::function<void(Buffer)>;
+    using ServerConnectedCallback   = std::function<void()>;
+    using ServerDisconnectedCallback= std::function<void()>;
 
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		// Set callbacks for server events
-		// These callbacks will be called from the network thread
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		void SetDataReceivedCallback(const DataReceivedCallback& function);
-		void SetServerConnectedCallback(const ServerConnectedCallback& function);
-		void SetServerDisconnectedCallback(const ServerDisconnectedCallback& function);
+    Client()  = default;
+    ~Client();
 
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		// Send Data
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		void SendBuffer(Buffer buffer, bool reliable = true);
-		void SendString(const std::string& string, bool reliable = true);
+    Client(const Client&)            = delete;
+    Client& operator=(const Client&) = delete;
 
-		template<typename T>
-		void SendData(const T& data, bool reliable = true)
-		{
-			SendBuffer(Buffer(&data, sizeof(T)), reliable);
-		}
+    // address can be "ip:port" or "hostname:port"
+    void ConnectToServer(const std::string& address);
+    void Disconnect();
 
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		// Connection Status & Debugging
-		//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-		[[nodiscard]] bool IsRunning() const { return m_Running; }
-		[[nodiscard]] ConnectionStatus GetConnectionStatus() const { return m_ConnectionStatus; }
-		[[nodiscard]] const std::string& GetConnectionDebugMessage() const { return m_ConnectionDebugMessage; }
+    bool IsConnected() const { return m_ConnectionStatus == ConnectionStatus::Connected; }
+    ConnectionStatus GetConnectionStatus() const { return m_ConnectionStatus; }
+    const std::string& GetConnectionDebugMessage() const { return m_ConnectionDebugMessage; }
 
-		[[nodiscard]] uint32_t GetID() const { return m_Connection; }
-	private:
-		void NetworkThreadFunc();
-		void Shutdown();
-	private:
-		static void ConnectionStatusChangedCallback(SteamNetConnectionStatusChangedCallback_t* info);
-		void OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
+    // Only valid after the DTLS handshake finishes (IsConnected() returns true
+    // AND m_HandshakeFinished is set).  Logs a warning otherwise.
+    void SendBuffer(Buffer buffer, bool reliable = true);
+    void SendString(const std::string& str, bool reliable = true);
 
-		void PollIncomingMessages();
-		void PollConnectionStateChanges();
+    void SetDataReceivedCallback      (const DataReceivedCallback&);
+    void SetServerConnectedCallback   (const ServerConnectedCallback&);
+    void SetServerDisconnectedCallback(const ServerDisconnectedCallback&);
 
-		void OnFatalError(const std::string& message);
-	private:
-		std::thread m_NetworkThread;
-		DataReceivedCallback m_DataReceivedCallback;
-		ServerConnectedCallback m_ServerConnectedCallback;
-		ServerDisconnectedCallback m_ServerDisconnectedCallback;
+private:
+    void NetworkThreadFunc();
+    void OnFatalError(const std::string& msg);
 
-		ConnectionStatus m_ConnectionStatus = ConnectionStatus::Disconnected;
-		std::string m_ConnectionDebugMessage;
+    // wolfSSL custom I/O (static C callbacks)
+    static int IOSend(WOLFSSL*, char* buf, int sz, void* ctx);
+    static int IORecv(WOLFSSL*, char* buf, int sz, void* ctx);
 
-		std::string m_ServerAddress, m_ServerIPAddress;
-		bool m_Running = false;
+    // ── State ────────────────────────────────────────────────────────────────
+    std::string m_ServerAddress;
 
-		ISteamNetworkingSockets* m_Interface = nullptr;
-		HSteamNetConnection m_Connection = 0;
-	};
+    int               m_Socket = -1;
+    std::atomic<bool> m_Running{false};
+    std::thread       m_NetworkThread;
 
-}
+    std::atomic<ConnectionStatus> m_ConnectionStatus{ConnectionStatus::Disconnected};
+    std::string                   m_ConnectionDebugMessage;
 
-#endif //PQC_MASTER_THESIS_2026_CLIENT_H
+    WOLFSSL_CTX* m_CTX    = nullptr;
+    WOLFSSL*     m_SSL    = nullptr;
+    bool         m_HandshakeFinished = false;
+
+    // Raw incoming UDP bytes waiting to be decrypted by wolfSSL
+    std::vector<uint8_t> m_IncomingEncryptedBuffer;
+
+    DataReceivedCallback       m_DataReceivedCallback;
+    ServerConnectedCallback    m_ServerConnectedCallback;
+    ServerDisconnectedCallback m_ServerDisconnectedCallback;
+};
+
+} // namespace Safira

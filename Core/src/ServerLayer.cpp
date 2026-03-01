@@ -3,16 +3,14 @@
 #include "SafiraAssert.h"
 #include "BufferStream.h"
 #include "StringUtils.h"
-
 #include <yaml-cpp/yaml.h>
-
 #include <iostream>
 #include <fstream>
 
 void ServerLayer::OnAttach() {
 	const int Port = 8192;
 
-	m_ScratchBuffer.Allocate(8192); // 8KB for now? probably too small for things like the client list/chat history
+	m_ScratchBuffer.Allocate(8192);
 
 	m_Server = std::make_unique<Safira::Server>(Port);
 	m_Server->SetClientConnectedCallback([this](const Safira::ClientInfo& clientInfo) { OnClientConnected(clientInfo); });
@@ -25,9 +23,8 @@ void ServerLayer::OnAttach() {
 	m_Console.AddTaggedMessage("Info", "Loading message history...");
 	LoadMessageHistoryFromFile(m_MessageHistoryFilePath);
 
-	for (const auto& message : m_MessageHistory) {
+	for (const auto& message : m_MessageHistory)
 		m_Console.AddTaggedMessage(message.Username, message.Message);
-	}
 
 	m_Console.AddTaggedMessage("Info", "Started server on port {}", Port);
 
@@ -36,7 +33,6 @@ void ServerLayer::OnAttach() {
 
 void ServerLayer::OnDetach() {
 	m_Server->Stop();
-	// wait for server to stop here?
 
 	m_ScratchBuffer.Release();
 }
@@ -47,7 +43,6 @@ void ServerLayer::OnUpdate(float ts) {
 		m_ClientListTimer = m_ClientListInterval;
 		SendClientListToAllClients();
 
-		// Save chat history every 10s too
 		SaveMessageHistoryToFile(m_MessageHistoryFilePath);
 	}
 }
@@ -57,7 +52,7 @@ void ServerLayer::OnUIRender() {
 }
 
 void ServerLayer::OnClientConnected(const Safira::ClientInfo& clientInfo) {
-	// Client connection is handled in the PacketType::ClientConnectionRequest case
+	// Full registration is deferred to PacketType::ClientConnectionRequest
 }
 
 void ServerLayer::OnClientDisconnected(const Safira::ClientInfo& clientInfo) {
@@ -68,8 +63,11 @@ void ServerLayer::OnClientDisconnected(const Safira::ClientInfo& clientInfo) {
 		m_ConnectedClients.erase(clientInfo.ID);
 	}
 	else {
-		std::cout << "[ERROR] OnClientDisconnected - Could not find client with ID=" << clientInfo.ID << std::endl;
-		std::cout << "  ConnectionDesc=" << clientInfo.ConnectionDesc << std::endl;
+		// Client disconnected before completing the handshake — normal for
+		// DTLS where a new peer might send a single datagram and disappear.
+		// AddressStr replaces the old ConnectionDesc field.
+		std::cout << "[WARN] OnClientDisconnected - unknown client ID="
+		          << clientInfo.ID << " addr=" << clientInfo.AddressStr << std::endl;
 	}
 }
 
@@ -79,23 +77,21 @@ void ServerLayer::OnDataReceived(const Safira::ClientInfo& clientInfo, const Saf
 	PacketType type;
 	bool success = stream.ReadRaw<PacketType>(type);
 	WL_CORE_VERIFY(success);
-	if (!success) // Why couldn't we read packet type? Probs invalid packet
-		return; 
+	if (!success)
+		return;
 
 	switch (type) {
 		case PacketType::Message: {
 			if (!m_ConnectedClients.contains(clientInfo.ID)) {
-				// Reject message data from clients we don't recognize
-				m_Console.AddMessage("Rejected incoming data from client ID={}", clientInfo.ID);
-				m_Console.AddMessage("  ConnectionDesc={}", clientInfo.ConnectionDesc);
+				// Data from a peer that never completed ClientConnectionRequest
+				m_Console.AddMessage("Rejected data from unregistered client ID={} addr={}",
+				                     clientInfo.ID, clientInfo.AddressStr);
 				return;
 			}
 
 			std::string message;
 			if (stream.ReadString(message)) {
 				if (IsValidMessage(message)) {
-					// Send to other clients and record
-					WL_CORE_VERIFY(m_ConnectedClients.contains(clientInfo.ID));
 					const auto& client = m_ConnectedClients.at(clientInfo.ID);
 
 					m_MessageHistory.push_back({ client.Username, message });
@@ -115,69 +111,61 @@ void ServerLayer::OnDataReceived(const Safira::ClientInfo& clientInfo, const Saf
 				SendClientConnectionRequestResponse(clientInfo, isValidUsername);
 
 				if (isValidUsername) {
-					m_Console.AddMessage("Welcome {} (color {})", requestedUsername, requestedColor);
-					auto& client = m_ConnectedClients[clientInfo.ID];
-					client.Username = requestedUsername;
-					client.Color = requestedColor;
-					// connection complete? notify everyone else
-					SendClientConnect(clientInfo);
+					m_Console.AddMessage("Welcome {} (color {}) from {}",
+					                     requestedUsername, requestedColor,
+					                     clientInfo.AddressStr);  // AddressStr replaces ConnectionDesc
+					auto& client     = m_ConnectedClients[clientInfo.ID];
+					client.Username  = requestedUsername;
+					client.Color     = requestedColor;
 
-					// Send the new client info about other connected clients
+					SendClientConnect(clientInfo);
 					SendClientList(clientInfo);
-					
-					// Send message history to new client
 					SendMessageHistory(clientInfo);
 				}
 				else {
-					m_Console.AddMessage("Client connection rejected with color {} and username {}", requestedColor, requestedUsername);
+					m_Console.AddMessage(
+					    "Client connection rejected: username='{}' color={} addr={}",
+					    requestedUsername, requestedColor, clientInfo.AddressStr);
 					m_Console.AddMessage("Reason: invalid username");
 				}
-
 			}
 			break;
 		}
+		default:
+			break;
 	}
 }
 
-void ServerLayer::OnMessageReceived(const Safira::ClientInfo& clientInfo, std::string_view message) {
-
-}
-
-void ServerLayer::OnClientConnectionRequest(const Safira::ClientInfo& clientInfo, uint32_t userColor, std::string_view username) {
-
-}
-
-void ServerLayer::OnClientUpdate(const Safira::ClientInfo& clientInfo, uint32_t userColor, std::string_view username) {
-
-}
+void ServerLayer::OnMessageReceived(const Safira::ClientInfo& clientInfo, std::string_view message) {}
+void ServerLayer::OnClientConnectionRequest(const Safira::ClientInfo& clientInfo, uint32_t userColor, std::string_view username) {}
+void ServerLayer::OnClientUpdate(const Safira::ClientInfo& clientInfo, uint32_t userColor, std::string_view username) {}
 
 void ServerLayer::SendClientList(const Safira::ClientInfo& clientInfo) {
-	std::vector<UserInfo> clientList(m_ConnectedClients.size());
-	uint32_t index = 0;
-
-	for (const auto& [clientID, clientInfo] : m_ConnectedClients)
-		clientList[index++] = clientInfo;
+	std::vector<UserInfo> clientList;
+	clientList.reserve(m_ConnectedClients.size());
+	for (const auto& [id, info] : m_ConnectedClients)
+		clientList.push_back(info);
 
 	Safira::BufferStreamWriter stream(m_ScratchBuffer);
 	stream.WriteRaw<PacketType>(PacketType::ClientList);
 	stream.WriteArray(clientList);
 
-	// WL_INFO("Sending client list to all clients");
-	m_Server->SendBufferToClient(clientInfo.ID, Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
+	m_Server->SendBufferToClient(clientInfo.ID,
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
 }
 
 void ServerLayer::SendClientListToAllClients() {
-	std::vector<UserInfo> clientList(m_ConnectedClients.size());
-	uint32_t index = 0;
-	for (const auto& [clientID, clientInfo] : m_ConnectedClients)
-		clientList[index++] = clientInfo;
+	std::vector<UserInfo> clientList;
+	clientList.reserve(m_ConnectedClients.size());
+	for (const auto& [id, info] : m_ConnectedClients)
+		clientList.push_back(info);
 
 	Safira::BufferStreamWriter stream(m_ScratchBuffer);
 	stream.WriteRaw<PacketType>(PacketType::ClientList);
 	stream.WriteArray(clientList);
 
-	// WL_INFO("Sending client list to all clients");
-	m_Server->SendBufferToAllClients(Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
+	m_Server->SendBufferToAllClients(
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
 }
 
 void ServerLayer::SendClientConnect(const Safira::ClientInfo& newClient) {
@@ -188,7 +176,8 @@ void ServerLayer::SendClientConnect(const Safira::ClientInfo& newClient) {
 	stream.WriteRaw<PacketType>(PacketType::ClientConnect);
 	stream.WriteObject(newClientInfo);
 
-	m_Server->SendBufferToAllClients(Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()), newClient.ID);
+	m_Server->SendBufferToAllClients(
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()), newClient.ID);
 }
 
 void ServerLayer::SendClientDisconnect(const Safira::ClientInfo& clientInfo) {
@@ -198,7 +187,8 @@ void ServerLayer::SendClientDisconnect(const Safira::ClientInfo& clientInfo) {
 	stream.WriteRaw<PacketType>(PacketType::ClientDisconnect);
 	stream.WriteObject(userInfo);
 
-	m_Server->SendBufferToAllClients(Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()), clientInfo.ID);
+	m_Server->SendBufferToAllClients(
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()), clientInfo.ID);
 }
 
 void ServerLayer::SendClientConnectionRequestResponse(const Safira::ClientInfo& clientInfo, bool response) {
@@ -206,12 +196,11 @@ void ServerLayer::SendClientConnectionRequestResponse(const Safira::ClientInfo& 
 	stream.WriteRaw<PacketType>(PacketType::ClientConnectionRequest);
 	stream.WriteRaw<bool>(response);
 
-	m_Server->SendBufferToClient(clientInfo.ID, Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
+	m_Server->SendBufferToClient(clientInfo.ID,
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
 }
 
-void ServerLayer::SendClientUpdateResponse(const Safira::ClientInfo& clientInfo) {
-
-}
+void ServerLayer::SendClientUpdateResponse(const Safira::ClientInfo& clientInfo) {}
 
 void ServerLayer::SendMessageToAllClients(const Safira::ClientInfo& fromClient, std::string_view message) {
 	Safira::BufferStreamWriter stream(m_ScratchBuffer);
@@ -219,7 +208,8 @@ void ServerLayer::SendMessageToAllClients(const Safira::ClientInfo& fromClient, 
 	stream.WriteString(GetClientUsername(fromClient.ID));
 	stream.WriteString(message);
 
-	m_Server->SendBufferToAllClients(Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()), fromClient.ID);
+	m_Server->SendBufferToAllClients(
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()), fromClient.ID);
 }
 
 void ServerLayer::SendMessageHistory(const Safira::ClientInfo& clientInfo) {
@@ -227,14 +217,16 @@ void ServerLayer::SendMessageHistory(const Safira::ClientInfo& clientInfo) {
 	stream.WriteRaw<PacketType>(PacketType::MessageHistory);
 	stream.WriteArray(m_MessageHistory);
 
-	m_Server->SendBufferToClient(clientInfo.ID, Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
+	m_Server->SendBufferToClient(clientInfo.ID,
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
 }
 
 void ServerLayer::SendServerShutdownToAllClients() {
 	Safira::BufferStreamWriter stream(m_ScratchBuffer);
 	stream.WriteRaw<PacketType>(PacketType::ServerShutdown);
 
-	m_Server->SendBufferToAllClients(Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
+	m_Server->SendBufferToAllClients(
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
 }
 
 void ServerLayer::SendClientKick(const Safira::ClientInfo& clientInfo, std::string_view reason) {
@@ -242,21 +234,21 @@ void ServerLayer::SendClientKick(const Safira::ClientInfo& clientInfo, std::stri
 	stream.WriteRaw<PacketType>(PacketType::ClientKick);
 	stream.WriteString(std::string(reason));
 
-	m_Server->SendBufferToClient(clientInfo.ID, Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
+	m_Server->SendBufferToClient(clientInfo.ID,
+	    Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition()));
 }
 
 bool ServerLayer::KickUser(std::string_view username, std::string_view reason) {
 	for (const auto& [clientID, userInfo] : m_ConnectedClients) {
 		if (userInfo.Username == username) {
-			Safira::ClientInfo clientInfo = { clientID, "" };
+			Safira::ClientInfo clientInfo;
+			clientInfo.ID = clientID;
 			SendClientKick(clientInfo, reason);
 			m_Server->KickClient(clientID);
 			OnClientDisconnected(clientInfo);
 			return true;
 		}
 	}
-
-	// Could not find user with requested username
 	return false;
 }
 
@@ -270,7 +262,6 @@ bool ServerLayer::IsValidUsername(const std::string& username) const {
 		if (client.Username == username)
 			return false;
 	}
-
 	return true;
 }
 
@@ -286,18 +277,16 @@ uint32_t ServerLayer::GetClientColor(Safira::ClientID clientID) const {
 
 void ServerLayer::SendChatMessage(std::string_view message) {
 	if (message[0] == '/') {
-		// Try to run command instead
 		OnCommand(message);
 		return;
 	}
 
 	Safira::BufferStreamWriter stream(m_ScratchBuffer);
 	stream.WriteRaw<PacketType>(PacketType::Message);
-	stream.WriteString(std::string_view("SERVER")); // Username
+	stream.WriteString(std::string_view("SERVER"));
 	stream.WriteString(message);
 	m_Server->SendBufferToAllClients(stream.GetBuffer());
 
-	// echo in own console and add to message history
 	m_Console.AddTaggedMessage("SERVER", message);
 	m_MessageHistory.push_back({ "SERVER", std::string(message) });
 }
@@ -307,8 +296,8 @@ void ServerLayer::OnCommand(std::string_view command) {
 		return;
 
 	std::string_view commandStr(&command[1], command.size() - 1);
-
 	auto tokens = Safira::Utils::SplitString(commandStr, ' ');
+
 	if (tokens[0] == "kick") {
 		if (tokens.size() == 2 || tokens.size() == 3) {
 			std::string_view reason = tokens.size() == 3 ? tokens[2] : "";
@@ -328,19 +317,19 @@ void ServerLayer::OnCommand(std::string_view command) {
 }
 
 void ServerLayer::SaveMessageHistoryToFile(const std::filesystem::path& filepath) {
-	YAML::Emitter out; {
-		out << YAML::BeginMap; // Root
+	YAML::Emitter out;
+	{
+		out << YAML::BeginMap;
 		out << YAML::Key << "MessageHistory" << YAML::Value;
-
 		out << YAML::BeginSeq;
 		for (const auto& chatMessage : m_MessageHistory) {
 			out << YAML::BeginMap;
-			out << YAML::Key << "User" << YAML::Value << chatMessage.Username;
+			out << YAML::Key << "User"    << YAML::Value << chatMessage.Username;
 			out << YAML::Key << "Message" << YAML::Value << chatMessage.Message;
 			out << YAML::EndMap;
 		}
 		out << YAML::EndSeq;
-		out << YAML::EndMap; // Root
+		out << YAML::EndMap;
 	}
 
 	std::ofstream fout(filepath);
@@ -358,7 +347,8 @@ bool ServerLayer::LoadMessageHistoryFromFile(const std::filesystem::path& filepa
 		data = YAML::LoadFile(filepath.string());
 	}
 	catch (YAML::ParserException e) {
-		std::cout << "[ERROR] Failed to load message history " << filepath << std::endl << e.what() << std::endl;
+		std::cout << "[ERROR] Failed to load message history " << filepath
+		          << std::endl << e.what() << std::endl;
 		return false;
 	}
 
@@ -368,7 +358,7 @@ bool ServerLayer::LoadMessageHistoryFromFile(const std::filesystem::path& filepa
 
 	m_MessageHistory.reserve(rootNode.size());
 	for (const auto& node : rootNode)
-		m_MessageHistory.emplace_back(ChatMessage(node["User"].as<std::string>(), node["Message"].as<std::string>()));
+		m_MessageHistory.emplace_back(node["User"].as<std::string>(), node["Message"].as<std::string>());
 
 	return true;
 }

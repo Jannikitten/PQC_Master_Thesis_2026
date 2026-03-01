@@ -1,198 +1,309 @@
 #include "Client.h"
-#include "NetworkingUtils.h"
-#include <iostream>
+
+#include <arpa/inet.h>     // inet_pton, inet_ntop
+#include <sys/socket.h>
+#include <netdb.h>         // getaddrinfo
+#include <unistd.h>        // close()
+#include <fcntl.h>         // O_NONBLOCK
+#include <cstring>
+#include <format>
+#include <print>
 #include <spdlog/spdlog.h>
 
 namespace Safira {
+    namespace {
+        // ─────────────────────────────────────────────────────────────────────────────
+        // Resolve "hostname" or "a.b.c.d" → IPv4 dotted-decimal string.
+        // Returns empty string on failure.
+        // ─────────────────────────────────────────────────────────────────────────────
+        std::string ResolveAddress(const std::string& host) {
+            // Try parsing as a bare IPv4 address first
+            in_addr tmp{};
+            if (::inet_pton(AF_INET, host.c_str(), &tmp) == 1)
+                return host;
 
-	// Can only have one server instance per-process
-	static Client* s_Instance = nullptr;
+            // Otherwise do a DNS lookup
+            addrinfo hints{};
+            hints.ai_family   = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
 
-	Client::~Client() {
-		if (m_NetworkThread.joinable())
-			m_NetworkThread.join();
-	}
+            addrinfo* result = nullptr;
+            if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result)
+                return {};
 
-	void Client::ConnectToServer(const std::string& serverAddress) {
-		if (m_Running)
-			return;
+            char buf[INET_ADDRSTRLEN];
+            ::inet_ntop(AF_INET,
+                &reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr,
+                buf, sizeof(buf));
 
-		if (m_NetworkThread.joinable())
-			m_NetworkThread.join();
+            ::freeaddrinfo(result);
+            return buf;
+        }
 
-		m_ServerAddress = serverAddress;
-		m_NetworkThread = std::thread([this]() { NetworkThreadFunc(); });
-	}
+        // Split "host:port" → {host, port}.  Returns port=0 on parse failure.
+        std::pair<std::string, uint16_t> SplitAddress(const std::string& addr) {
+            auto colon = addr.rfind(':');
+            if (colon == std::string::npos) return {addr, 0};
 
-	void Client::Disconnect() {
-		m_Running = false;
+            std::string host = addr.substr(0, colon);
+            uint16_t    port = 0;
+            try { port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1))); }
+            catch (...) {}
+            return {host, port};
+        }
+    } // anonymous namespace
 
-		if (m_NetworkThread.joinable())
-			m_NetworkThread.join();
-	}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Dtor
+    // ─────────────────────────────────────────────────────────────────────────────
+    Client::~Client() {
+        Disconnect();
+    }
 
-	void Client::SetDataReceivedCallback(const DataReceivedCallback& function) {
-		m_DataReceivedCallback = function;
-	}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Public interface
+    // ─────────────────────────────────────────────────────────────────────────────
+    void Client::ConnectToServer(const std::string& address) {
+        if (m_Running) return;
+        if (m_NetworkThread.joinable()) m_NetworkThread.join();
 
-	void Client::SetServerConnectedCallback(const ServerConnectedCallback& function) {
-		m_ServerConnectedCallback = function;
-	}
+        m_ServerAddress = address;
+        m_NetworkThread = std::thread([this] { NetworkThreadFunc(); });
+    }
 
-	void Client::SetServerDisconnectedCallback(const ServerDisconnectedCallback& function) {
-		m_ServerDisconnectedCallback = function;
-	}
+    void Client::Disconnect() {
+        m_Running = false;
+        if (m_NetworkThread.joinable()) m_NetworkThread.join();
+    }
 
-	void Client::NetworkThreadFunc() {
-		s_Instance = this;
+    void Client::SetDataReceivedCallback(const DataReceivedCallback& fn)       { m_DataReceivedCallback       = fn; }
+    void Client::SetServerConnectedCallback(const ServerConnectedCallback& fn) { m_ServerConnectedCallback    = fn; }
+    void Client::SetServerDisconnectedCallback(const ServerDisconnectedCallback& fn) { m_ServerDisconnectedCallback = fn; }
 
-		// Reset connection status
-		m_ConnectionStatus = ConnectionStatus::Connecting;
+    // ─────────────────────────────────────────────────────────────────────────────
+    // wolfSSL custom I/O (static)
+    // ─────────────────────────────────────────────────────────────────────────────
+    int Client::IOSend(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
+        auto* self = static_cast<Client*>(ctx);
 
-		SteamDatagramErrMsg errMsg;
-		if (!GameNetworkingSockets_Init(nullptr, errMsg)) {
-			m_ConnectionDebugMessage = "Could not initialize GameNetworkingSockets";
-			m_ConnectionStatus = ConnectionStatus::FailedToConnect;
-			return;
-		}
+        ssize_t sent = ::send(self->m_Socket, buf, sz, 0);
+        if (sent < 0) return WOLFSSL_CBIO_ERR_GENERAL;
+        return static_cast<int>(sent);
+    }
 
-		// Select instance to use.  For now we'll always use the default.
-		m_Interface = SteamNetworkingSockets();
+    int Client::IORecv(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
+        auto* self = static_cast<Client*>(ctx);
 
-		if (Utils::IsValidIPAddress(m_ServerAddress))
-			m_ServerIPAddress = m_ServerAddress;
-		else
-			m_ServerIPAddress = Utils::ResolveDomainName(m_ServerAddress);
+        if (self->m_IncomingEncryptedBuffer.empty())
+            return WOLFSSL_CBIO_ERR_WANT_READ;
 
-		// Start connecting
-		SteamNetworkingIPAddr address;
-		if (!address.ParseString(m_ServerIPAddress.c_str())) {
-			OnFatalError(fmt::format("Invalid IP address - could not parse {}", m_ServerIPAddress));
-			m_ConnectionDebugMessage = "Invalid IP address";
-			m_ConnectionStatus = ConnectionStatus::FailedToConnect;
-			return;
-		}
+        int copySz = std::min(sz, static_cast<int>(self->m_IncomingEncryptedBuffer.size()));
+        std::memcpy(buf, self->m_IncomingEncryptedBuffer.data(), copySz);
+        self->m_IncomingEncryptedBuffer.erase(
+            self->m_IncomingEncryptedBuffer.begin(),
+            self->m_IncomingEncryptedBuffer.begin() + copySz);
+        return copySz;
+    }
 
-		SteamNetworkingConfigValue_t options;
-		options.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)ConnectionStatusChangedCallback);
-		m_Connection = m_Interface->ConnectByIPAddress(address, 1, &options);
-		if (m_Connection == k_HSteamNetConnection_Invalid) {
-			m_ConnectionDebugMessage = "Failed to create connection";
-			m_ConnectionStatus = ConnectionStatus::FailedToConnect;
-			return;
-		}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Network thread
+    // ─────────────────────────────────────────────────────────────────────────────
+    void Client::NetworkThreadFunc() {
+        m_Running              = true;
+        m_HandshakeFinished    = false;
+        m_ConnectionStatus     = ConnectionStatus::Connecting;
+        m_ConnectionDebugMessage.clear();
 
-		m_Running = true;
-		while (m_Running) {
-			PollIncomingMessages();
-			PollConnectionStateChanges();
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
+        // ── 1. Resolve address ──────────────────────────────────────────────────
+        auto [hostPart, port] = SplitAddress(m_ServerAddress);
+        if (port == 0) {
+            OnFatalError(std::format("Could not parse port from '{}'", m_ServerAddress));
+            return;
+        }
 
-		m_Interface->CloseConnection(m_Connection, 0, nullptr, false);
-		m_ConnectionStatus = ConnectionStatus::Disconnected;
-		GameNetworkingSockets_Kill();
-	}
+        std::string ipStr = ResolveAddress(hostPart);
+        if (ipStr.empty()) {
+            OnFatalError(std::format("Could not resolve host '{}'", hostPart));
+            return;
+        }
 
-	void Client::Shutdown() {
-		m_Running = false;
-	}
+        std::println("Connecting to {}:{}", ipStr, port);
 
-	void Client::SendBuffer(Buffer buffer, bool reliable) {
-		EResult result = m_Interface->SendMessageToConnection(m_Connection, buffer.Data, (uint32_t)buffer.Size, reliable ? k_nSteamNetworkingSend_Reliable : k_nSteamNetworkingSend_Unreliable, nullptr);
-		// handle result?
-	}
+        // ── 2. Create and connect UDP socket ────────────────────────────────────
+        m_Socket = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (m_Socket < 0) {
+            OnFatalError("Failed to create UDP socket");
+            return;
+        }
 
-	void Client::SendString(const std::string& string, bool reliable) {
-		SendBuffer(Buffer(string.data(), string.size()), reliable);
-	}
+        sockaddr_in server{};
+        server.sin_family = AF_INET;
+        server.sin_port   = htons(port);
+        if (::inet_pton(AF_INET, ipStr.c_str(), &server.sin_addr) != 1) {
+            OnFatalError(std::format("inet_pton failed for '{}'", ipStr));
+            return;
+        }
 
-	void Client::PollIncomingMessages() {
-		// Process all messages
-		while (m_Running) {
-			ISteamNetworkingMessage* incomingMessage = nullptr;
-			int messageCount = m_Interface->ReceiveMessagesOnConnection(m_Connection, &incomingMessage, 1);
-			if (messageCount == 0)
-				break;
+        // "connect" on a UDP socket just sets the default peer so we can use
+        // send()/recv() instead of sendto()/recvfrom(), and filters out packets
+        // from other sources.
+        if (::connect(m_Socket, reinterpret_cast<sockaddr*>(&server), sizeof(server)) < 0) {
+            OnFatalError("UDP connect() failed");
+            return;
+        }
 
-			if (messageCount < 0) {
-				// messageCount < 0 means critical error?
-				m_Running = false;
-				return;
-			}
+        // Non-blocking so our recv loop never hangs
+        ::fcntl(m_Socket, F_SETFL, O_NONBLOCK);
 
-			m_DataReceivedCallback(Buffer(incomingMessage->m_pData, incomingMessage->m_cbSize));
+        // ── 3. wolfSSL context + session ────────────────────────────────────────
+        wolfSSL_Init();
+        m_CTX = wolfSSL_CTX_new(wolfDTLSv1_3_client_method());
+        if (!m_CTX) {
+            OnFatalError("wolfSSL_CTX_new failed");
+            return;
+        }
 
-			// Release when done
-			incomingMessage->Release();
-		}
-	}
+        int groups[] = { WOLFSSL_ML_KEM_512 };
+        wolfSSL_CTX_set_groups(m_CTX, groups, 1);
 
-	void Client::PollConnectionStateChanges() {
-		m_Interface->RunCallbacks();
-	}
+        wolfSSL_CTX_SetIOSend(m_CTX, IOSend);
+        wolfSSL_CTX_SetIORecv(m_CTX, IORecv);
 
-	void Client::ConnectionStatusChangedCallback(SteamNetConnectionStatusChangedCallback_t* info) { s_Instance->OnConnectionStatusChanged(info); }
+        // Skip certificate verification for now — add your CA cert in production:
+        // wolfSSL_CTX_load_verify_locations(m_CTX, "ca-cert.pem", nullptr);
+        wolfSSL_CTX_set_verify(m_CTX, WOLFSSL_VERIFY_NONE, nullptr);
 
-	void Client::OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* info) {
-		//assert(pInfo->m_hConn == m_hConnection || m_hConnection == k_HSteamNetConnection_Invalid);
+        m_SSL = wolfSSL_new(m_CTX);
+        if (!m_SSL) {
+            OnFatalError("wolfSSL_new failed");
+            return;
+        }
 
-		// Handle connection state
-		switch (info->m_info.m_eState) {
-			case k_ESteamNetworkingConnectionState_None:
-				// NOTE: We will get callbacks here when we destroy connections. You can ignore these.
-				break;
+        wolfSSL_SetIOReadCtx (m_SSL, this);
+        wolfSSL_SetIOWriteCtx(m_SSL, this);
+        wolfSSL_dtls_set_mtu (m_SSL, 1400);   // match server MTU
 
-			case k_ESteamNetworkingConnectionState_ClosedByPeer:
-			case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
-				m_Running = false;
-				m_ConnectionStatus = ConnectionStatus::FailedToConnect;
-				m_ConnectionDebugMessage = info->m_info.m_szEndDebug;
+        // ── 4. Start the DTLS handshake ─────────────────────────────────────────
+        // wolfSSL_connect() sends the ClientHello; the response will arrive later.
+        {
+            int ret = wolfSSL_connect(m_SSL);
+            if (ret != WOLFSSL_SUCCESS) {
+                int err = wolfSSL_get_error(m_SSL, ret);
+                if (err != WOLFSSL_ERROR_WANT_READ && err != WOLFSSL_ERROR_WANT_WRITE) {
+                    OnFatalError(std::format("wolfSSL_connect initiation failed: {}", err));
+                    return;
+                }
+            }
+        }
 
-				// Print an appropriate message
-				if (info->m_eOldState == k_ESteamNetworkingConnectionState_Connecting) {
-					// Note: we could distinguish between a timeout, a rejected connection,
-					// or some other transport problem.
-					std::cout << "Could not connect to remove host. " << info->m_info.m_szEndDebug << std::endl;
-				}
-				else if (info->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
-					std::cout << "Lost connection with remote host. " << info->m_info.m_szEndDebug << std::endl;
-				}
-				else {
-					// NOTE: We could check the reason code for a normal disconnection
-					std::cout << "Disconnected from host. " << info->m_info.m_szEndDebug << std::endl;
-				}
+        // Mark as "connecting at the UDP level" — the app-level Connected event
+        // fires only after the DTLS handshake completes below.
+        m_ConnectionStatus = ConnectionStatus::Connecting;
 
-				// Clean up the connection.  This is important!
-				// The connection is "closed" in the network sense, but
-				// it has not been destroyed.  We must close it on our end, too
-				// to finish up.  The reason information do not matter in this case,
-				// and we cannot linger because it's already closed on the other end,
-				// so we just pass 0s.
-				m_Interface->CloseConnection(info->m_hConn, 0, nullptr, false);
-				m_Connection = k_HSteamNetConnection_Invalid;
-				m_ConnectionStatus = ConnectionStatus::Disconnected;
-				break;
-			}
+        constexpr size_t kMtu = 1500;
+        uint8_t rawBuf[kMtu];
 
-			case k_ESteamNetworkingConnectionState_Connecting:
-				// We will get this callback when we start connecting.
-				// We can ignore this.
-				break;
+        // ── 5. Main loop ─────────────────────────────────────────────────────────
+        while (m_Running) {
+            // ── 5a. Receive incoming UDP datagrams ───────────────────────────────
+            ssize_t len = ::recv(m_Socket, rawBuf, sizeof(rawBuf), 0);
+            if (len > 0) {
+                m_IncomingEncryptedBuffer.insert(
+                    m_IncomingEncryptedBuffer.end(), rawBuf, rawBuf + len);
+            }
 
-			case k_ESteamNetworkingConnectionState_Connected:
-				m_ConnectionStatus = ConnectionStatus::Connected;
-				if (m_ServerConnectedCallback)
-					m_ServerConnectedCallback();
-				break;
+            // ── 5b. Advance state machine ────────────────────────────────────────
+            if (!m_HandshakeFinished) {
+                // Keep driving wolfSSL_connect() until the handshake completes
+                int ret = wolfSSL_connect(m_SSL);
+                if (ret == WOLFSSL_SUCCESS) {
+                    m_HandshakeFinished    = true;
+                    m_ConnectionStatus     = ConnectionStatus::Connected;
+                    std::println("PQC handshake complete!");
 
-			default:
-				break;
-		}
-	}
+                    if (m_ServerConnectedCallback)
+                        m_ServerConnectedCallback();
+                } else {
+                    int err = wolfSSL_get_error(m_SSL, ret);
+                    if (err != WOLFSSL_ERROR_WANT_READ && err != WOLFSSL_ERROR_WANT_WRITE) {
+                        // Real failure
+                        m_ConnectionDebugMessage = std::format("Handshake failed: err={}", err);
+                        spdlog::error("{}", m_ConnectionDebugMessage);
+                        m_ConnectionStatus = ConnectionStatus::FailedToConnect;
+                        break;
+                    }
+                    // WANT_READ / WANT_WRITE → just wait for more packets
+                }
+            } else {
+                // ── 5c. Drain decrypted application data ─────────────────────────
+                char plaintext[4096];
+                while (true) {
+                    int bytes = wolfSSL_read(m_SSL, plaintext, sizeof(plaintext));
+                    if (bytes > 0) {
+                        if (m_DataReceivedCallback)
+                            m_DataReceivedCallback(Buffer(plaintext, bytes));
+                    } else {
+                        int err = wolfSSL_get_error(m_SSL, bytes);
+                        if (err == WOLFSSL_ERROR_ZERO_RETURN) {
+                            // Server sent close_notify
+                            spdlog::info("Server closed the connection");
+                            m_Running = false;
+                        }
+                        break; // WANT_READ or error — try again next iteration
+                    }
+                }
+            }
 
-	void Client::OnFatalError(const std::string& message) {
-		std::cout << message << std::endl;
-		m_Running = false;
-	}
-}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // ── 6. Cleanup ───────────────────────────────────────────────────────────
+        if (m_SSL) {
+            wolfSSL_shutdown(m_SSL);
+            wolfSSL_free(m_SSL);
+            m_SSL = nullptr;
+        }
+        if (m_CTX) {
+            wolfSSL_CTX_free(m_CTX);
+            m_CTX = nullptr;
+        }
+        wolfSSL_Cleanup();
+
+        ::close(m_Socket);
+        m_Socket = -1;
+
+        m_HandshakeFinished = false;
+        m_ConnectionStatus  = ConnectionStatus::Disconnected;
+
+        if (m_ServerDisconnectedCallback)
+            m_ServerDisconnectedCallback();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Send
+    // ─────────────────────────────────────────────────────────────────────────────
+    void Client::SendBuffer(Buffer buf, bool /*reliable*/) {
+        if (!m_SSL || !m_HandshakeFinished) {
+            spdlog::warn("SendBuffer: PQC handshake not finished yet");
+            return;
+        }
+
+        int ret = wolfSSL_write(m_SSL, buf.Data, static_cast<int>(buf.Size));
+        if (ret <= 0)
+            spdlog::error("wolfSSL_write failed: {}", wolfSSL_get_error(m_SSL, ret));
+    }
+
+    void Client::SendString(const std::string& str, bool reliable) {
+        SendBuffer(Buffer(str.data(), str.size()), reliable);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Misc
+    // ─────────────────────────────────────────────────────────────────────────────
+    void Client::OnFatalError(const std::string& msg) {
+        spdlog::critical("Client fatal error: {}", msg);
+        m_ConnectionDebugMessage = msg;
+        m_ConnectionStatus       = ConnectionStatus::FailedToConnect;
+        m_Running                = false;
+    }
+} // namespace Safira

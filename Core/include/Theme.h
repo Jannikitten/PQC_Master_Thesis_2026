@@ -2,6 +2,7 @@
 #define PQC_MASTER_THESIS_2026_THEME_H
 
 #include <imgui.h>
+#include <algorithm>
 #include <glm/glm.hpp>
 
 namespace Safira::UI {

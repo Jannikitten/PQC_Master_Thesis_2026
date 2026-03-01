@@ -53,7 +53,11 @@ mkdir -p install
 # The --with-liboqs path now correctly points to the liboqs installation within CRYPTO_LIBS_ROOT
 ./configure --prefix="$PWD/install" \
             --enable-kyber \
-            --enable-dilithium
+            --enable-dilithium \
+            --enable-dtls \
+            --enable-dtls13 \
+            --enable-dtls-mtu \
+            --enable-dtls-frag-ch
 make -j$(nproc) # Use all available cores for make
 make install
 cd .. # Go back to CRYPTO_LIBS_ROOT

@@ -3,8 +3,6 @@
 #include "ApplicationGUI.h"
 #include "UI.h"
 #include "BufferStream.h"
-#include "NetworkingUtils.h"
-#include "StringUtils.h"
 #include "misc/cpp/imgui_stdlib.h"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
@@ -38,7 +36,7 @@ void ClientLayer::OnUIRender() {
 }
 
 bool ClientLayer::IsConnected() const {
-	return m_Client->GetConnectionStatus() == Safira::Client::ConnectionStatus::Connected;
+	return m_Client->GetConnectionStatus() == Safira::ConnectionStatus::Connected;
 }
 
 void ClientLayer::OnDisconnectButton() {
@@ -46,7 +44,7 @@ void ClientLayer::OnDisconnectButton() {
 }
 
 void ClientLayer::UI_ConnectionModal() {
-	if (!m_ConnectionModalOpen && m_Client->GetConnectionStatus() != Safira::Client::ConnectionStatus::Connected)
+	if (!m_ConnectionModalOpen && m_Client->GetConnectionStatus() != Safira::ConnectionStatus::Connected)
 	{
 		ImGui::OpenPopup("Connect to server");
 	}
@@ -66,53 +64,48 @@ void ClientLayer::UI_ConnectionModal() {
 		ImGui::SameLine();
 		if (ImGui::Button("Connect"))
 		{
-			m_Color = IM_COL32(m_ColorBuffer[0] * 255.0f, m_ColorBuffer[1] * 255.0f, m_ColorBuffer[2] * 255.0f, m_ColorBuffer[3] * 255.0f);
+			m_Color = IM_COL32(
+				m_ColorBuffer[0] * 255.0f,
+				m_ColorBuffer[1] * 255.0f,
+				m_ColorBuffer[2] * 255.0f,
+				m_ColorBuffer[3] * 255.0f);
 
-			if (Safira::Utils::IsValidIPAddress(m_ServerIP))
-			{
-				m_Client->ConnectToServer(m_ServerIP);
-			}
-			else
-			{
-				// Try resolve domain name
-				auto ipTokens = Safira::Utils::SplitString(m_ServerIP, ':'); // [0] == hostname, [1] (optional) == port
-				std::string serverIP = Safira::Utils::ResolveDomainName(ipTokens[0]);
-				if (ipTokens.size() != 2)
-					serverIP = fmt::format("{}:{}", serverIP, 8192); // Add default port if hostname doesn't contain port
-				else
-					serverIP = fmt::format("{}:{}", serverIP, ipTokens[1]); // Add specified port
+			// The new Client handles "host:port" and bare IPs natively.
+			// Append the default port when the user hasn't specified one.
+			std::string addressToConnect = m_ServerIP;
+			if (addressToConnect.rfind(':') == std::string::npos)
+				addressToConnect += ":8192";
 
-				m_Client->ConnectToServer(serverIP);
-			}
-
+			m_Client->ConnectToServer(addressToConnect);
 		}
 
 		if (Safira::UI::ButtonCentered("Quit"))
 			Safira::ApplicationGUI::Get().Close();
 
-		if (m_Client->GetConnectionStatus() == Safira::Client::ConnectionStatus::Connected)
+		const auto status = m_Client->GetConnectionStatus();
+
+		if (status == Safira::ConnectionStatus::Connected)
 		{
-			// Send username
+			// Send username + colour immediately after transport connects
 			Safira::BufferStreamWriter stream(m_ScratchBuffer);
 			stream.WriteRaw<PacketType>(PacketType::ClientConnectionRequest);
-			stream.WriteRaw<uint32_t>(m_Color); // Color
-			stream.WriteString(m_Username); // Username
+			stream.WriteRaw<uint32_t>(m_Color);
+			stream.WriteString(m_Username);
 
 			m_Client->SendBuffer(stream.GetBuffer());
 
 			SaveConnectionDetails(m_ConnectionDetailsFilePath);
 
-			// Wait for response
 			ImGui::CloseCurrentPopup();
 		}
-		else if (m_Client->GetConnectionStatus() == Safira::Client::ConnectionStatus::FailedToConnect)
+		else if (status == Safira::ConnectionStatus::FailedToConnect)
 		{
 			ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.1f, 1.0f), "Connection failed.");
 			const auto& debugMessage = m_Client->GetConnectionDebugMessage();
 			if (!debugMessage.empty())
 				ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.1f, 1.0f), debugMessage.c_str());
 		}
-		else if (m_Client->GetConnectionStatus() == Safira::Client::ConnectionStatus::Connecting)
+		else if (status == Safira::ConnectionStatus::Connecting)
 		{
 			ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Connecting...");
 		}
@@ -142,7 +135,7 @@ void ClientLayer::UI_ClientList()
 void ClientLayer::OnConnected()
 {
 	m_Console.ClearLog();
-	// Welcome message sent in PacketType::ClientConnectionRequest response handling
+	// Welcome message is deferred until PacketType::MessageHistory is received
 }
 
 void ClientLayer::OnDisconnected()
@@ -165,23 +158,20 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 		stream.ReadString(fromUsername);
 		stream.ReadString(message);
 
-		// Find user
 		if (m_ConnectedClients.contains(fromUsername))
 		{
 			const auto& clientInfo = m_ConnectedClients.at(fromUsername);
 			m_Console.AddTaggedMessageWithColor(clientInfo.Color, fromUsername, message);
 		}
-		else if (fromUsername == "SERVER") // special message from server
+		else if (fromUsername == "SERVER")
 		{
 			m_Console.AddTaggedMessage(fromUsername, message);
 		}
 		else
 		{
 			std::cout << "[ERROR] Message from unknown user? This shouldn't happen..." << std::endl;
-			// display message anyway
 			m_Console.AddTaggedMessage(fromUsername, message);
 		}
-
 		break;
 	}
 	case PacketType::ClientConnectionRequest:
@@ -190,13 +180,12 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 		stream.ReadRaw<bool>(requestStatus);
 		if (requestStatus)
 		{
-			// Defer connection message to after message history is received
 			m_ShowSuccessfulConnectionMessage = true;
-			// m_Console.AddItalicMessageWithColor(0xff8a8a8a, "Successfully connected to {} with username {}", m_ServerIP, m_Username);
 		}
 		else
 		{
-			m_Console.AddItalicMessageWithColor(0xfffa4a4a, "Server rejected connection with username {}", m_Username);
+			m_Console.AddItalicMessageWithColor(0xfffa4a4a,
+				"Server rejected connection with username {}", m_Username);
 		}
 		break;
 	}
@@ -207,11 +196,9 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 		std::vector<UserInfo> clientList;
 		stream.ReadArray(clientList);
 
-		// Update our client list
 		m_ConnectedClients.clear();
 		for (const auto& client : clientList)
 			m_ConnectedClients[client.Username] = client;
-
 		break;
 	}
 	case PacketType::ClientConnect:
@@ -221,7 +208,6 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 
 		m_ConnectedClients[newClient.Username] = newClient;
 		m_Console.AddItalicMessageWithColor(newClient.Color, "Welcome {}!", newClient.Username);
-
 		break;
 	}
 	case PacketType::ClientUpdate:
@@ -243,7 +229,6 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 		stream.ReadArray(messageHistory);
 		for (const auto& message : messageHistory)
 		{
-			// find user color if connected
 			uint32_t userColor = 0xffffffff;
 			if (m_ConnectedClients.contains(message.Username))
 				userColor = m_ConnectedClients.at(message.Username).Color;
@@ -254,9 +239,9 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 		if (m_ShowSuccessfulConnectionMessage)
 		{
 			m_ShowSuccessfulConnectionMessage = false;
-			m_Console.AddItalicMessageWithColor(0xff8a8a8a, "Successfully connected to {} with username {}", m_ServerIP, m_Username);
+			m_Console.AddItalicMessageWithColor(0xff8a8a8a,
+				"Successfully connected to {} with username {}", m_ServerIP, m_Username);
 		}
-
 		break;
 	}
 	case PacketType::ServerShutdown:
@@ -291,7 +276,6 @@ void ClientLayer::SendChatMessage(std::string_view message)
 		stream.WriteString(messageToSend);
 		m_Client->SendBuffer(stream.GetBuffer());
 
-		// echo in own console
 		m_Console.AddTaggedMessageWithColor(m_Color | 0xff000000, m_Username, messageToSend);
 	}
 }
@@ -300,16 +284,14 @@ void ClientLayer::SaveConnectionDetails(const std::filesystem::path& filepath)
 {
 	YAML::Emitter out;
 	{
-		out << YAML::BeginMap; // Root
+		out << YAML::BeginMap;
 		out << YAML::Key << "ConnectionDetails" << YAML::Value;
-
 		out << YAML::BeginMap;
 		out << YAML::Key << "Username" << YAML::Value << m_Username;
-		out << YAML::Key << "Color" << YAML::Value << m_Color;
+		out << YAML::Key << "Color"    << YAML::Value << m_Color;
 		out << YAML::Key << "ServerIP" << YAML::Value << m_ServerIP;
 		out << YAML::EndMap;
-
-		out << YAML::EndMap; // Root
+		out << YAML::EndMap;
 	}
 
 	std::ofstream fout(filepath);
@@ -328,7 +310,8 @@ bool ClientLayer::LoadConnectionDetails(const std::filesystem::path& filepath)
 	}
 	catch (YAML::ParserException e)
 	{
-		std::cout << "[ERROR] Failed to load message history " << filepath << std::endl << e.what() << std::endl;
+		std::cout << "[ERROR] Failed to load connection details " << filepath
+		          << std::endl << e.what() << std::endl;
 		return false;
 	}
 

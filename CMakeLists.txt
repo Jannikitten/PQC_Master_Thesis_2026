@@ -8,7 +8,6 @@ include(FetchContent)
 
 FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/TheCherno/glfw.git GIT_TAG master)
 FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git GIT_TAG 0af55ccecd98d4e5a8d1fad7de25ba429d60e863)
-FetchContent_Declare(gns GIT_REPOSITORY https://github.com/ValveSoftware/GameNetworkingSockets.git GIT_TAG master)
 FetchContent_Declare(spdlog GIT_REPOSITORY https://github.com/gabime/spdlog.git GIT_TAG v1.x)
 FetchContent_Declare(yaml-cpp GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git GIT_TAG master)
 
@@ -17,28 +16,37 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 
-find_package(absl REQUIRED)
-find_package(Protobuf REQUIRED)
-
-FetchContent_MakeAvailable(glfw glm gns spdlog yaml-cpp)
-
-# Critical Mac/Homebrew fix for GNS
-if(TARGET GameNetworkingSockets)
-        target_link_libraries(GameNetworkingSockets PRIVATE
-                "-L/opt/homebrew/lib"
-                absl_log_internal_check_op
-                absl_log_internal_message
-                absl_log_internal_nullguard
-                absl_log_globals
-                absl_base
-                absl_throw_delegate
-                absl_raw_logging_internal
-        )
-endif()
+FetchContent_MakeAvailable(glfw glm spdlog yaml-cpp)
 
 # 6-7. Find Vulkan, OpenSSL & WolfSSL
 find_package(Vulkan REQUIRED)
 find_package(OpenSSL REQUIRED)
+
+add_compile_definitions(
+        WOLFSSL_DTLS
+        WOLFSSL_DTLS13
+        WOLFSSL_DTLS_MTU
+        WOLFSSL_EXTRA
+        HAVE_MLKEM
+        HAVE_MLDSA
+)
+
+# --- wolfSSL Submodule Configuration ---
+set(WOLFSSL_DTLS ON CACHE BOOL "" FORCE)
+set(WOLFSSL_DTLS13 ON CACHE BOOL "" FORCE)
+set(WOLFSSL_MLKEM ON CACHE BOOL "" FORCE)
+set(WOLFSSL_MLDSA ON CACHE BOOL "" FORCE)
+set(WOLFSSL_EXPERIMENTAL ON CACHE BOOL "" FORCE)
+
+set(WOLFSSL_DTLS_MTU ON CACHE BOOL "" FORCE)
+set(WOLFSSL_DTLS_CH_FRAG ON CACHE BOOL "" FORCE)
+
+set(WOLFSSL_USER_IO ON CACHE BOOL "" FORCE)
+set(WOLFSSL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WOLFSSL_CRYPT_TESTS OFF CACHE BOOL "" FORCE)
+
+# Adjust this path to wherever your submodule is (e.g., "external/wolfssl" or "vendor/wolfssl")
+add_subdirectory(wolfssl)
 
 # ---------------------------------------------------------
 # 8. Define the Shared CORE Library
@@ -57,14 +65,12 @@ add_library(CoreLib STATIC
         Core/src/UserInfo.cpp
         Core/src/StreamReader.cpp
         Core/src/StreamWriter.cpp
-        Core/src/NetworkingUtils.cpp
         Core/src/ServerPacket.cpp
         Core/src/BufferStream.cpp
         Core/src/StringUtils.cpp
         Core/src/Server.cpp
         Core/src/ApplicationConsole.cpp
         Core/src/Console.cpp
-        Core/include/Console.h
 )
 
 # ---------------------------------------------------------
@@ -114,22 +120,29 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 ${CMAKE_SOURCE_DIR}/imgui
                 ${CMAKE_SOURCE_DIR}/imgui/misc
                 ${CMAKE_SOURCE_DIR}/imgui/backends
-                ${CMAKE_SOURCE_DIR}/glm
-                ${CMAKE_SOURCE_DIR}/spdlog/include
                 ${CMAKE_SOURCE_DIR}/Resources
+                ${CMAKE_BINARY_DIR}/wolfssl
+        )
+
+        target_compile_definitions(${TGT} PRIVATE
+                WOLFSSL_DTLS
+                WOLFSSL_DTLS13
+                WOLFSSL_DTLS_MTU
+                WOLFSSL_DTLS_CH_FRAG
+                HAVE_MLKEM  # New standard for ML-KEM (Kyber)
+                HAVE_MLDSA  # New standard for ML-DSA (Dilithium)
+                WOLFSSL_EXTRA
         )
 
         target_link_libraries(${TGT} PUBLIC
                 glfw
                 glm::glm
-                GameNetworkingSockets::GameNetworkingSockets
-                ${Protobuf_LIBRARIES}
-                absl::base
                 spdlog
                 yaml-cpp::yaml-cpp
                 OpenSSL::SSL
                 OpenSSL::Crypto
                 Vulkan::Vulkan
+                wolfssl::wolfssl
         )
 
         if(APPLE)
@@ -143,5 +156,5 @@ foreach(TGT IN LISTS ALL_TARGETS)
 endforeach()
 
 # Final assembly
-target_link_libraries(SafiraClient PRIVATE CoreLib)
-target_link_libraries(SafiraServer PRIVATE CoreLib)
+target_link_libraries(SafiraClient PRIVATE CoreLib wolfssl::wolfssl)
+target_link_libraries(SafiraServer PRIVATE CoreLib wolfssl::wolfssl)
