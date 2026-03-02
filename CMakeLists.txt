@@ -3,7 +3,7 @@ project(PQC_Master_Thesis_2026)
 
 set(CMAKE_CXX_STANDARD 23)
 
-# 1-5. Fetch Dependencies (Keeping your logic exactly as is)
+# 1-5. Fetch Dependencies
 include(FetchContent)
 
 FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/TheCherno/glfw.git GIT_TAG master)
@@ -12,16 +12,17 @@ FetchContent_Declare(spdlog GIT_REPOSITORY https://github.com/gabime/spdlog.git 
 FetchContent_Declare(yaml-cpp GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git GIT_TAG master)
 
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(glfw glm spdlog yaml-cpp)
 
-# 6-7. Find Vulkan, OpenSSL & WolfSSL
+# 6. Find Vulkan & OpenSSL
 find_package(Vulkan REQUIRED)
 find_package(OpenSSL REQUIRED)
 
+# 7. wolfSSL
 add_compile_definitions(
         WOLFSSL_DTLS
         WOLFSSL_DTLS13
@@ -31,27 +32,69 @@ add_compile_definitions(
         HAVE_MLDSA
 )
 
-# --- wolfSSL Submodule Configuration ---
-set(WOLFSSL_DTLS ON CACHE BOOL "" FORCE)
-set(WOLFSSL_DTLS13 ON CACHE BOOL "" FORCE)
-set(WOLFSSL_MLKEM ON CACHE BOOL "" FORCE)
-set(WOLFSSL_MLDSA ON CACHE BOOL "" FORCE)
+set(WOLFSSL_DTLS         ON CACHE BOOL "" FORCE)
+set(WOLFSSL_DTLS13       ON CACHE BOOL "" FORCE)
+set(WOLFSSL_MLKEM        ON CACHE BOOL "" FORCE)
+set(WOLFSSL_MLDSA        ON CACHE BOOL "" FORCE)
 set(WOLFSSL_EXPERIMENTAL ON CACHE BOOL "" FORCE)
-
-set(WOLFSSL_DTLS_MTU ON CACHE BOOL "" FORCE)
+set(WOLFSSL_DTLS_MTU     ON CACHE BOOL "" FORCE)
 set(WOLFSSL_DTLS_CH_FRAG ON CACHE BOOL "" FORCE)
+set(WOLFSSL_USER_IO      ON CACHE BOOL "" FORCE)
+set(WOLFSSL_EXAMPLES     OFF CACHE BOOL "" FORCE)
+set(WOLFSSL_CRYPT_TESTS  OFF CACHE BOOL "" FORCE)
 
-set(WOLFSSL_USER_IO ON CACHE BOOL "" FORCE)
-set(WOLFSSL_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(WOLFSSL_CRYPT_TESTS OFF CACHE BOOL "" FORCE)
-
-# Adjust this path to wherever your submodule is (e.g., "external/wolfssl" or "vendor/wolfssl")
 add_subdirectory(wolfssl)
 
-# ---------------------------------------------------------
-# 8. Define the Shared CORE Library
-# ---------------------------------------------------------
-# Includes everything in Core/ except App wrappers and Layer specific logic
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Botan 3
+#
+# First try find_package using Botan's own cmake config.  If the config path
+# or version string doesn't match exactly (it varies between patch releases),
+# fall back to creating the imported target manually from the known install
+# layout.  The fallback is always correct as long as Botan_ROOT is right.
+# ─────────────────────────────────────────────────────────────────────────────
+set(Botan_ROOT "${CMAKE_SOURCE_DIR}/botan/install"
+        CACHE PATH "Root of the Botan install prefix (the directory passed to --prefix)")
+
+find_package(Botan 3.11.0
+        PATHS "${Botan_ROOT}/lib/cmake/Botan-3.11.0"
+        NO_DEFAULT_PATH
+        QUIET
+)
+
+if(NOT TARGET Botan::Botan)
+        message(STATUS "Botan::Botan not created by find_package — building imported target from ${Botan_ROOT}")
+
+        # Locate the library (static preferred; fall back to shared)
+        if(EXISTS "${Botan_ROOT}/lib/libbotan-3.a")
+                set(_botan_lib  "${Botan_ROOT}/lib/libbotan-3.a")
+                set(_botan_type STATIC)
+        elseif(EXISTS "${Botan_ROOT}/lib/libbotan-3.so")
+                set(_botan_lib  "${Botan_ROOT}/lib/libbotan-3.so")
+                set(_botan_type SHARED)
+        elseif(EXISTS "${Botan_ROOT}/lib/libbotan-3.dylib")
+                set(_botan_lib  "${Botan_ROOT}/lib/libbotan-3.dylib")
+                set(_botan_type SHARED)
+        else()
+                message(FATAL_ERROR
+                        "Cannot find Botan library under ${Botan_ROOT}/lib/\n"
+                        "Build and install Botan from the submodule first:\n"
+                        "  cd botan\n"
+                        "  python3 configure.py --prefix=./install --with-tls --with-ml-kem --with-ml-dsa\n"
+                        "  make -j\$(nproc) && make install")
+        endif()
+
+        add_library(Botan::Botan ${_botan_type} IMPORTED GLOBAL)
+        set_target_properties(Botan::Botan PROPERTIES
+                IMPORTED_LOCATION             "${_botan_lib}"
+                INTERFACE_INCLUDE_DIRECTORIES "${Botan_ROOT}/include/botan-3"
+        )
+        message(STATUS "Botan::Botan -> ${_botan_lib}")
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. CoreLib
+# ─────────────────────────────────────────────────────────────────────────────
 add_library(CoreLib STATIC
         Core/src/ApplicationGUI.cpp
         Core/src/Image.cpp
@@ -71,16 +114,16 @@ add_library(CoreLib STATIC
         Core/src/Server.cpp
         Core/src/ApplicationConsole.cpp
         Core/src/Console.cpp
+        Core/src/PrivateChatSession.cpp
+        Core/include/PrivateChatSession.h
 )
 
-# ---------------------------------------------------------
-# 9. Define the CLIENT Executable
-# ---------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Client executable
+# ─────────────────────────────────────────────────────────────────────────────
 add_executable(SafiraClient
         Client/ClientApp.cpp
         Core/src/ClientLayer.cpp
-
-        # ImGui (Located in root/imgui)
         imgui/imgui.cpp
         imgui/imgui_draw.cpp
         imgui/imgui_tables.cpp
@@ -91,14 +134,12 @@ add_executable(SafiraClient
         imgui/backends/imgui_impl_glfw.cpp
 )
 
-# ---------------------------------------------------------
-# 10. Define the SERVER Executable
-# ---------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Server executable
+# ─────────────────────────────────────────────────────────────────────────────
 add_executable(SafiraServer
         Server/ServerApp.cpp
         Core/src/ServerLayer.cpp
-
-        # ImGui (Located in root/imgui)
         imgui/imgui.cpp
         imgui/imgui_draw.cpp
         imgui/imgui_tables.cpp
@@ -109,9 +150,9 @@ add_executable(SafiraServer
         imgui/backends/imgui_impl_glfw.cpp
 )
 
-# ---------------------------------------------------------
-# 11. Include Directories & Global Linking
-# ---------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Include dirs, compile definitions, link libraries
+# ─────────────────────────────────────────────────────────────────────────────
 set(ALL_TARGETS CoreLib SafiraClient SafiraServer)
 
 foreach(TGT IN LISTS ALL_TARGETS)
@@ -122,6 +163,7 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 ${CMAKE_SOURCE_DIR}/imgui/backends
                 ${CMAKE_SOURCE_DIR}/Resources
                 ${CMAKE_BINARY_DIR}/wolfssl
+                "${Botan_ROOT}/include/botan-3"
         )
 
         target_compile_definitions(${TGT} PRIVATE
@@ -129,8 +171,8 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 WOLFSSL_DTLS13
                 WOLFSSL_DTLS_MTU
                 WOLFSSL_DTLS_CH_FRAG
-                HAVE_MLKEM  # New standard for ML-KEM (Kyber)
-                HAVE_MLDSA  # New standard for ML-DSA (Dilithium)
+                HAVE_MLKEM
+                HAVE_MLDSA
                 WOLFSSL_EXTRA
         )
 
@@ -143,6 +185,7 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 OpenSSL::Crypto
                 Vulkan::Vulkan
                 wolfssl::wolfssl
+                Botan::Botan
         )
 
         if(APPLE)
@@ -151,10 +194,11 @@ foreach(TGT IN LISTS ALL_TARGETS)
                         "-framework CoreVideo" "-framework Metal" "-framework QuartzCore"
                 )
         elseif(WIN32)
-                target_link_libraries(${TGT} PRIVATE User32.lib Gdi32.lib Shell32.lib ws2_32.lib)
+                target_link_libraries(${TGT} PRIVATE
+                        User32.lib Gdi32.lib Shell32.lib ws2_32.lib
+                )
         endif()
 endforeach()
 
-# Final assembly
 target_link_libraries(SafiraClient PRIVATE CoreLib wolfssl::wolfssl)
 target_link_libraries(SafiraServer PRIVATE CoreLib wolfssl::wolfssl)
