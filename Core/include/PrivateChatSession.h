@@ -7,6 +7,7 @@
 #include <atomic>
 #include <vector>
 #include <netinet/in.h>
+#include "P2PCredentialGenerator.h"
 
 // Botan forward-declaration — no namespace nesting needed for the channel base class
 namespace Botan::TLS { class Channel; }
@@ -28,8 +29,7 @@ public:
     PrivateChatSession(const PrivateChatSession&)            = delete;
     PrivateChatSession& operator=(const PrivateChatSession&) = delete;
 
-    uint16_t StartAsResponder(const std::string& certPath,
-                              const std::string& keyPath);
+    uint16_t StartAsResponder(P2PKeyType keyType = P2PKeyType::RSA_PSS);
     void     StartAsInitiator(const std::string& peerAddress);
 
     void Close();
@@ -44,7 +44,7 @@ public:
                        uint32_t color = 0xFFFFFFFF);
 
 private:
-    void ResponderThreadFunc(std::string certPath, std::string keyPath);
+    void ResponderThreadFunc(P2PKeyType keyType);
     void InitiatorThreadFunc(std::string peerAddress);
     void RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks);
 

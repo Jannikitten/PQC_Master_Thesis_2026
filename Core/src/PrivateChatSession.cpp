@@ -3,10 +3,9 @@
 // Use short-form includes — CMake adds botan/install/include/botan-3 to the
 // include path via the Botan::Botan target, so <botan/xyz.h> resolves cleanly.
 // Never use relative ../botan/install/... paths in source files.
+#include <algorithm>
 #include <botan/auto_rng.h>
 #include <botan/certstor.h>
-#include <botan/data_src.h>
-#include <botan/pkcs8.h>
 #include <botan/tls.h>
 #include <botan/tls_callbacks.h>
 #include <botan/tls_channel.h>
@@ -15,6 +14,7 @@
 #include <botan/tls_server.h>
 #include <botan/tls_server_info.h>
 #include <botan/tls_session_manager_memory.h>
+#include <botan/tls_signature_scheme.h>
 #include <botan/x509cert.h>
 
 #include <arpa/inet.h>
@@ -33,16 +33,34 @@ namespace Safira {
 // ─────────────────────────────────────────────────────────────────────────────
 class PQPolicy : public Botan::TLS::Default_Policy {
 public:
-    Botan::TLS::Protocol_Version min_version() const {
+    [[nodiscard]] Botan::TLS::Protocol_Version min_version() const {
         return Botan::TLS::Protocol_Version::TLS_V13;
     }
-    std::vector<Botan::TLS::Group_Params> key_exchange_groups() const override {
+    [[nodiscard]] std::vector<Botan::TLS::Group_Params> key_exchange_groups() const override {
         return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
     }
-    std::vector<Botan::TLS::Group_Params> key_exchange_groups_to_offer() const override {
+    [[nodiscard]] std::vector<Botan::TLS::Group_Params> key_exchange_groups_to_offer() const override {
         return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
     }
-    bool require_cert_revocation_info() const override { return false; }
+    [[nodiscard]] bool require_cert_revocation_info() const override { return false; }
+
+    // TLS 1.3 only supports RSA-PSS (not PKCS1v15) for authentication.
+    // Botan's default policy includes RSA-PSS but being explicit here ensures
+    // our self-signed RSA cert is accepted regardless of how it was signed.
+    [[nodiscard]] std::vector<Botan::TLS::Signature_Scheme> allowed_signature_schemes() const override {
+        return {
+            Botan::TLS::Signature_Scheme::RSA_PSS_SHA256,
+            Botan::TLS::Signature_Scheme::RSA_PSS_SHA384,
+            Botan::TLS::Signature_Scheme::RSA_PSS_SHA512,
+            Botan::TLS::Signature_Scheme::ECDSA_SHA256,
+            Botan::TLS::Signature_Scheme::ECDSA_SHA384,
+            Botan::TLS::Signature_Scheme::ECDSA_SHA512,
+            // Botan::TLS::Signature_Scheme::ML_DSA_65,
+            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA256,
+            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA384,
+            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA512,
+        };
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,41 +70,41 @@ public:
 //   • cert_chain()       → find_cert_chain()
 //   • Private_Key*       → std::shared_ptr<Private_Key>   (private_key_for)
 // ─────────────────────────────────────────────────────────────────────────────
-class ServerCredentials : public Botan::Credentials_Manager {
-public:
-    ServerCredentials(const std::string& certPath, const std::string& keyPath) {
-        Botan::DataSource_Stream certSrc(certPath);
-        m_Cert = std::make_unique<Botan::X509_Certificate>(certSrc);
+    class ServerCredentials : public Botan::Credentials_Manager {
+    public:
+        // From in-memory key material (new)
+        explicit ServerCredentials(const P2PKeyMaterial& km)
+            : m_Key(km.Key), m_Cert(km.Cert) {}
 
-        Botan::DataSource_Stream keySrc(keyPath);
-        // load_key returns unique_ptr<Private_Key>; convert to shared_ptr so
-        // we can return it from private_key_for() without a use-after-free.
-        m_Key = Botan::PKCS8::load_key(keySrc);
-    }
+        std::vector<Botan::X509_Certificate> find_cert_chain(
+            const std::vector<std::string>& cert_key_types,
+            const std::vector<Botan::AlgorithmIdentifier>&,
+            const std::vector<Botan::X509_DN>&,
+            const std::string& type,
+            const std::string&) override
+        {
+            if (type == "tls-server") {
+                const std::string our_key_type = m_Key->algo_name();
+                if (cert_key_types.empty() ||
+                    std::find(cert_key_types.begin(), cert_key_types.end(), our_key_type)
+                        != cert_key_types.end())
+                    return { *m_Cert };
+            }
+            return {};
+        }
 
-    // Botan 3: method is find_cert_chain, not cert_chain
-    std::vector<Botan::X509_Certificate> find_cert_chain(
-        const std::vector<std::string>& /*cert_key_types*/,
-        const std::vector<Botan::AlgorithmIdentifier>& /*cert_sig_schemes*/,
-        const std::string& /*type*/,
-        const std::string& /*context*/)
-    {
-        return { *m_Cert };
-    }
+        std::shared_ptr<Botan::Private_Key> private_key_for(
+            const Botan::X509_Certificate&,
+            const std::string&,
+            const std::string&) override
+        {
+            return m_Key;
+        }
 
-    // Botan 3: must return shared_ptr<Private_Key>, NOT Private_Key*
-    std::shared_ptr<Botan::Private_Key> private_key_for(
-        const Botan::X509_Certificate& /*cert*/,
-        const std::string& /*type*/,
-        const std::string& /*context*/) override
-    {
-        return m_Key;
-    }
-
-private:
-    std::unique_ptr<Botan::X509_Certificate> m_Cert;
-    std::shared_ptr<Botan::Private_Key>      m_Key;  // shared_ptr matches return type
-};
+    private:
+        std::shared_ptr<Botan::X509_Certificate> m_Cert;
+        std::shared_ptr<Botan::Private_Key>      m_Key;
+    };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ClientCredentials — Phase 1: no cert verification
@@ -116,7 +134,7 @@ public:
     void tls_emit_data(std::span<const uint8_t> data) override {
         ssize_t total = 0;
         while (total < static_cast<ssize_t>(data.size())) {
-            ssize_t sent = ::send(m_Socket, data.data() + total, data.size() - total, 0);
+            const ssize_t sent = ::send(m_Socket, data.data() + total, data.size() - total, 0);
             if (sent <= 0) { spdlog::error("[P2P] tls_emit_data: send() failed"); return; }
             total += sent;
         }
@@ -153,8 +171,9 @@ public:
         const std::vector<std::optional<Botan::OCSP::Response>>& /*ocsp*/,
         const std::vector<Botan::Certificate_Store*>& /*trusted*/,
         Botan::Usage_Type /*usage*/,
-        const std::string& /*hostname*/,
-        const Botan::TLS::Policy& /*policy*/) {}
+        std::string_view /*hostname*/,
+        const Botan::TLS::Policy& /*policy*/) override
+    {}
 
     bool IsActivated()           const { return m_Activated;           }
     bool IsCloseNotifyReceived() const { return m_CloseNotifyReceived; }
@@ -190,8 +209,7 @@ PrivateChatSession::~PrivateChatSession() { Close(); }
 // ─────────────────────────────────────────────────────────────────────────────
 // StartAsResponder
 // ─────────────────────────────────────────────────────────────────────────────
-uint16_t PrivateChatSession::StartAsResponder(const std::string& certPath,
-                                              const std::string& keyPath) {
+    uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
     m_Socket = ::socket(AF_INET, SOCK_STREAM, 0);
     if (m_Socket < 0) { spdlog::error("[P2P] socket() failed"); return 0; }
 
@@ -216,7 +234,7 @@ uint16_t PrivateChatSession::StartAsResponder(const std::string& certPath,
         0xFF888888);
 
     m_Running = true;
-    m_Thread  = std::thread([this, certPath, keyPath] { ResponderThreadFunc(certPath, keyPath); });
+    m_Thread  = std::thread([this, keyType] { ResponderThreadFunc(keyType); });
     return port;
 }
 
@@ -233,7 +251,6 @@ void PrivateChatSession::StartAsInitiator(const std::string& peerAddress) {
 // ─────────────────────────────────────────────────────────────────────────────
 void PrivateChatSession::Close() {
     m_Running = false;
-    if (m_Socket >= 0) ::shutdown(m_Socket, SHUT_RDWR);
     if (m_Thread.joinable()) m_Thread.join();
     if (m_Socket >= 0) { ::close(m_Socket); m_Socket = -1; }
     m_Connected = false;
@@ -251,7 +268,7 @@ void PrivateChatSession::Send(const std::string& message) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ResponderThreadFunc
 // ─────────────────────────────────────────────────────────────────────────────
-void PrivateChatSession::ResponderThreadFunc(std::string certPath, std::string keyPath) {
+    void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
     int listenSock = m_Socket;
     sockaddr_in peer{};
     socklen_t peerLen = sizeof(peer);
@@ -266,10 +283,11 @@ void PrivateChatSession::ResponderThreadFunc(std::string certPath, std::string k
     spdlog::info("[P2P] TCP accepted from {}:{}", peerIp, ntohs(peer.sin_port));
 
     try {
+        auto km          = GenerateP2PCredentials(keyType);
         auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
         auto callbacks   = std::make_shared<P2PCallbacks>(connSock, *this, m_PeerUsername);
         auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng);
-        auto creds       = std::make_shared<ServerCredentials>(certPath, keyPath);
+        auto creds       = std::make_shared<ServerCredentials>(km);
         auto policy      = std::make_shared<PQPolicy>();
 
         Botan::TLS::Server channel(callbacks, session_mgr, creds, policy, rng, false);
@@ -333,7 +351,7 @@ void PrivateChatSession::InitiatorThreadFunc(std::string peerAddress) {
 // ─────────────────────────────────────────────────────────────────────────────
 // RunLoop
 // ─────────────────────────────────────────────────────────────────────────────
-void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks) {
+    void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks) {
     constexpr int kBufSize = 16384;
     uint8_t recvBuf[kBufSize];
 
@@ -362,9 +380,13 @@ void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* cal
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    try { channel->close(); } catch (...) {}
-    ::close(m_Socket);
-    m_Socket    = -1;
+    // Send close_notify while the socket is still alive
+    if (m_Socket >= 0 && !channel->is_closed()) {
+        try { channel->close(); } catch (...) {}
+    }
+
+    // Now safe to close the socket
+    if (m_Socket >= 0) { ::close(m_Socket); m_Socket = -1; }
     m_Connected = false;
 }
 

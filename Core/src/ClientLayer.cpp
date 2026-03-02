@@ -382,7 +382,7 @@ void ClientLayer::SendPrivateChatResponse(const std::string& toUsername, bool ac
 
 void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
     auto session = std::make_unique<Safira::PrivateChatSession>(peerUsername);
-    uint16_t port = session->StartAsResponder("server.pem", "server-key.pem");
+    uint16_t port = session->StartAsResponder(Safira::P2PKeyType::RSA_PSS);
     if (port == 0) {
         m_Console.AddItalicMessage("Failed to start P2P listener for {}", peerUsername);
         return;

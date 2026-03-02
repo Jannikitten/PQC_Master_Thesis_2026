@@ -74,7 +74,8 @@ if(NOT TARGET Botan::Botan)
                 set(_botan_type SHARED)
         elseif(EXISTS "${Botan_ROOT}/lib/libbotan-3.dylib")
                 set(_botan_lib  "${Botan_ROOT}/lib/libbotan-3.dylib")
-                set(_botan_type SHARED)
+                set(_botan_type SHARED
+                        Core/include/P2PCredentialGenerator.h)
         else()
                 message(FATAL_ERROR
                         "Cannot find Botan library under ${Botan_ROOT}/lib/\n"
