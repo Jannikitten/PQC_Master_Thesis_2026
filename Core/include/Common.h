@@ -1,4 +1,6 @@
-#pragma once
+#ifndef PQC_MASTER_THESIS_2026_COMMON_H
+#define PQC_MASTER_THESIS_2026_COMMON_H
+
 #include <cstdint>
 #include <cstring>
 
@@ -24,3 +26,4 @@ namespace Safira {
     }
 
 } // namespace Safira
+#endif //PQC_MASTER_THESIS_2026_APPLICATIONCONSOLE_H

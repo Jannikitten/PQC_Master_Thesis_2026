@@ -247,7 +247,10 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 	case PacketType::ServerShutdown:
 	{
 		m_Console.AddItalicMessage("Server is shutting down... goodbye!");
-		m_Client->Disconnect();
+		// RequestDisconnect sets m_Running=false without joining the thread.
+		// We are currently ON the network thread (inside a data callback), so
+		// calling Disconnect() (which joins) would deadlock.
+		m_Client->RequestDisconnect();
 		break;
 	}
 	case PacketType::ClientKick:
@@ -258,7 +261,8 @@ void ClientLayer::OnDataReceived(const Safira::Buffer buffer)
 		if (!reason.empty())
 			m_Console.AddItalicMessage("Reason: {}", reason);
 
-		m_Client->Disconnect();
+		// Same as above — must not join from within the network thread.
+		m_Client->RequestDisconnect();
 		break;
 	}
 	default:

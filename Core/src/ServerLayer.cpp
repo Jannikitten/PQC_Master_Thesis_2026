@@ -3,7 +3,9 @@
 #include "SafiraAssert.h"
 #include "BufferStream.h"
 #include "StringUtils.h"
+
 #include <yaml-cpp/yaml.h>
+
 #include <iostream>
 #include <fstream>
 
@@ -244,8 +246,11 @@ bool ServerLayer::KickUser(std::string_view username, std::string_view reason) {
 			Safira::ClientInfo clientInfo;
 			clientInfo.ID = clientID;
 			SendClientKick(clientInfo, reason);
+			// KickClient -> RemoveClient already fires m_ClientDisconnectedCallback
+			// -> OnClientDisconnected, which erases from m_ConnectedClients.
+			// Do NOT call OnClientDisconnected manually here or it fires twice,
+			// causing the "unknown client ID" warning.
 			m_Server->KickClient(clientID);
-			OnClientDisconnected(clientInfo);
 			return true;
 		}
 	}

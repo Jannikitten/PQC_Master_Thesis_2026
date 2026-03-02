@@ -5,52 +5,53 @@
 #include <netdb.h>         // getaddrinfo
 #include <unistd.h>        // close()
 #include <fcntl.h>         // O_NONBLOCK
-#include <cstring>
 #include <format>
 #include <print>
 #include <spdlog/spdlog.h>
 
 namespace Safira {
     namespace {
-        // ─────────────────────────────────────────────────────────────────────────────
-        // Resolve "hostname" or "a.b.c.d" → IPv4 dotted-decimal string.
-        // Returns empty string on failure.
-        // ─────────────────────────────────────────────────────────────────────────────
-        std::string ResolveAddress(const std::string& host) {
-            // Try parsing as a bare IPv4 address first
-            in_addr tmp{};
-            if (::inet_pton(AF_INET, host.c_str(), &tmp) == 1)
-                return host;
 
-            // Otherwise do a DNS lookup
-            addrinfo hints{};
-            hints.ai_family   = AF_INET;
-            hints.ai_socktype = SOCK_DGRAM;
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Resolve "hostname" or "a.b.c.d" → IPv4 dotted-decimal string.
+    // Returns empty string on failure.
+    // ─────────────────────────────────────────────────────────────────────────────
+    std::string ResolveAddress(const std::string& host) {
+        // Try parsing as a bare IPv4 address first
+        in_addr tmp{};
+        if (::inet_pton(AF_INET, host.c_str(), &tmp) == 1)
+            return host;
 
-            addrinfo* result = nullptr;
-            if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result)
-                return {};
+        // Otherwise do a DNS lookup
+        addrinfo hints{};
+        hints.ai_family   = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
 
-            char buf[INET_ADDRSTRLEN];
-            ::inet_ntop(AF_INET,
-                &reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr,
-                buf, sizeof(buf));
+        addrinfo* result = nullptr;
+        if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result)
+            return {};
 
-            ::freeaddrinfo(result);
-            return buf;
-        }
+        char buf[INET_ADDRSTRLEN];
+        ::inet_ntop(AF_INET,
+            &reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr,
+            buf, sizeof(buf));
 
-        // Split "host:port" → {host, port}.  Returns port=0 on parse failure.
-        std::pair<std::string, uint16_t> SplitAddress(const std::string& addr) {
-            auto colon = addr.rfind(':');
-            if (colon == std::string::npos) return {addr, 0};
+        ::freeaddrinfo(result);
+        return buf;
+    }
 
-            std::string host = addr.substr(0, colon);
-            uint16_t    port = 0;
-            try { port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1))); }
-            catch (...) {}
-            return {host, port};
-        }
+    // Split "host:port" → {host, port}.  Returns port=0 on parse failure.
+    std::pair<std::string, uint16_t> SplitAddress(const std::string& addr) {
+        auto colon = addr.rfind(':');
+        if (colon == std::string::npos) return {addr, 0};
+
+        std::string host = addr.substr(0, colon);
+        uint16_t    port = 0;
+        try { port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1))); }
+        catch (...) {}
+        return {host, port};
+    }
+
     } // anonymous namespace
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +260,12 @@ namespace Safira {
 
         // ── 6. Cleanup ───────────────────────────────────────────────────────────
         if (m_SSL) {
-            wolfSSL_shutdown(m_SSL);
+            // Only send close_notify when WE initiated the disconnect.
+            // If the server kicked us or shut down, it already closed the session
+            // on its side. Sending close_notify then would arrive as an unknown
+            // UDP datagram and be misread as a brand-new incoming connection.
+            if (!m_SuppressShutdown)
+                wolfSSL_shutdown(m_SSL);
             wolfSSL_free(m_SSL);
             m_SSL = nullptr;
         }
@@ -306,4 +312,5 @@ namespace Safira {
         m_ConnectionStatus       = ConnectionStatus::FailedToConnect;
         m_Running                = false;
     }
+
 } // namespace Safira
