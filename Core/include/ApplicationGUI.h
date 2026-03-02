@@ -1,13 +1,15 @@
 #ifndef PQC_MASTER_THESIS_2026_APPLICATIONGUI_H
 #define PQC_MASTER_THESIS_2026_APPLICATIONGUI_H
 
-#include <string>
-#include <vector>
-#include <queue>
-#include <mutex>
-#include <memory>
-#include <functional>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "Layer.h"
 #include "Image.h"
@@ -18,97 +20,107 @@ void check_vk_result(VkResult err);
 struct GLFWwindow;
 
 namespace Safira {
-    struct ApplicationSpecification {
-        std::string name = "Safira Chat";
-        uint32_t width = 1600;
-        uint32_t height = 900;
 
-        std::filesystem::path IconPath;
+struct ApplicationSpecification {
+    std::string           name             = "Safira Chat";
+    uint32_t              width            = 1600;
+    uint32_t              height           = 900;
+    std::filesystem::path IconPath;
+    bool                  WindowResizeable = true;
+    bool                  CustomTitlebar   = false;
+    bool                  CenterWindow     = false;
+};
 
-        bool WindowResizeable = true;
-        bool CustomTitlebar = false;
-        bool CenterWindow = false;
-    };
+class ApplicationGUI {
+public:
+    explicit ApplicationGUI(const ApplicationSpecification& spec = ApplicationSpecification());
+    ~ApplicationGUI();
 
-    class ApplicationGUI {
-    public:
-        explicit ApplicationGUI(const ApplicationSpecification& applicationSpecification = ApplicationSpecification());
-        ~ApplicationGUI();
+    ApplicationGUI(const ApplicationGUI&)            = delete;
+    ApplicationGUI& operator=(const ApplicationGUI&) = delete;
 
-        static ApplicationGUI& Get();
+    static ApplicationGUI& Get();
 
-        void Run();
-        void SetMenubarCallback(const std::function<void()>& menubarCallback) { m_MenubarCallback = menubarCallback; }
+    void Run();
+    void Close();
 
-        template<typename T>
-        void PushLayer() {
-            static_assert(std::is_base_of_v<Layer, T>, "Pushed type is not subclass of Layer!");
-            m_LayerStack.emplace_back(std::make_shared<T>())->OnAttach();
-        }
+    void SetMenubarCallback(std::function<void()> fn) { m_MenubarCallback = std::move(fn); }
 
-        void PushLayer(const std::shared_ptr<Layer>& layer) { m_LayerStack.emplace_back(layer); layer->OnAttach(); }
+    template <typename T>
+    void PushLayer() {
+        static_assert(std::is_base_of_v<Layer, T>, "Pushed type is not subclass of Layer!");
+        m_LayerStack.emplace_back(std::make_shared<T>())->OnAttach();
+    }
 
-        void Close();
+    void PushLayer(const std::shared_ptr<Layer>& layer) {
+        m_LayerStack.emplace_back(layer);
+        layer->OnAttach();
+    }
 
-        bool IsMaximized() const;
-        std::shared_ptr<Image> GetApplicationIcon() const { return m_AppHeaderIcon; }
+    [[nodiscard]] bool                    IsMaximized()        const;
+    [[nodiscard]] float                   GetTime();
+    [[nodiscard]] GLFWwindow*             GetWindowHandle()    const { return m_WindowHandle; }
+    [[nodiscard]] bool                    IsTitleBarHovered()  const { return m_TitleBarHovered; }
+    [[nodiscard]] std::shared_ptr<Image>  GetApplicationIcon() const { return m_AppHeaderIcon; }
 
-        float GetTime();
-        [[nodiscard]] GLFWwindow* GetWindowHandle() const { return m_WindowHandle; }
-        bool IsTitleBarHovered() const { return m_TitleBarHovered; }
+    static VkInstance       GetInstance();
+    static VkPhysicalDevice GetPhysicalDevice();
+    static VkDevice         GetDevice();
 
-        static VkInstance GetInstance();
-        static VkPhysicalDevice GetPhysicalDevice();
-        static VkDevice GetDevice();
+    static VkCommandBuffer  GetCommandBuffer(bool begin);
+    static void             FlushCommandBuffer(VkCommandBuffer commandBuffer);
 
-        static VkCommandBuffer GetCommandBuffer(bool begin);
-        static void FlushCommandBuffer(VkCommandBuffer commandBuffer);
+    static void    SubmitResourceFree(std::function<void()>&& func);
+    static ImFont* GetFont(std::string_view name);
 
-        static void SubmitResourceFree(std::function<void()>&& func);
+    /// Thread-safe: can be called from network threads, GLFW callbacks, etc.
+    template <typename Func>
+    void QueueEvent(Func&& func) {
+        std::scoped_lock lock(m_EventQueueMutex);
+        m_EventQueue.push(std::forward<Func>(func));
+    }
 
-        static ImFont* GetFont(const std::string& name);
+private:
+    void Init();
+    void Shutdown();
 
-        template<typename Func>
-        void QueueEvent(Func&& func)
-        {
-            m_EventQueue.push(func);
-        }
-    private:
-        void Init();
-        void Shutdown();
+    void UI_DrawTitlebar(float& outTitlebarHeight);
+    void UI_DrawMenubar();
 
-        void UI_DrawTitlebar(float& outTitlebarHeight);
-        void UI_DrawMenubar();
+    /// Decode an embedded PNG byte array into a GPU-uploaded Image.
+    static std::shared_ptr<Image> LoadEmbeddedIcon(const unsigned char* data, std::size_t size);
 
-        void Spring(float weight, float spacing);
-        void Spring();
+    void Spring(float weight, float spacing);
+    void Spring();
 
-        ApplicationSpecification m_Specification;
-        GLFWwindow* m_WindowHandle = nullptr;
-        bool m_Running = false;
+    // ── State ────────────────────────────────────────────────────────────────
+    ApplicationSpecification m_Specification;
+    GLFWwindow*              m_WindowHandle = nullptr;
+    bool                     m_Running      = false;
 
-        float m_TimeStep = 0.0f;
-        float m_FrameTime = 0.0f;
-        float m_LastFrameTime = 0.0f;
+    float m_TimeStep      = 0.0f;
+    float m_FrameTime     = 0.0f;
+    float m_LastFrameTime = 0.0f;
 
-        bool m_TitleBarHovered = false;
+    bool m_TitleBarHovered = false;
 
-        std::vector<std::shared_ptr<Layer>> m_LayerStack;
-        std::function<void()> m_MenubarCallback;
+    std::vector<std::shared_ptr<Layer>> m_LayerStack;
+    std::function<void()>               m_MenubarCallback;
 
-        std::mutex m_EventQueueMutex;
-        std::queue<std::function<void()>> m_EventQueue;
+    std::mutex                         m_EventQueueMutex;
+    std::queue<std::function<void()>>  m_EventQueue;
 
-        // Resources
-        std::shared_ptr<Image> m_AppHeaderIcon;
-        std::shared_ptr<Image> m_IconClose;
-        std::shared_ptr<Image> m_IconMinimize;
-        std::shared_ptr<Image> m_IconMaximize;
-        std::shared_ptr<Image> m_IconRestore;
-    };
+    // Resources
+    std::shared_ptr<Image> m_AppHeaderIcon;
+    std::shared_ptr<Image> m_IconClose;
+    std::shared_ptr<Image> m_IconMinimize;
+    std::shared_ptr<Image> m_IconMaximize;
+    std::shared_ptr<Image> m_IconRestore;
+};
 
-    // Implemented by apps
-    ApplicationGUI* CreateApplication(int argc, char** argv);
-}
+/// Implemented by the application (Client or Server).
+std::unique_ptr<ApplicationGUI> CreateApplication(int argc, char** argv);
 
-#endif //PQC_MASTER_THESIS_2026_APPLICATIONGUI_H
+} // namespace Safira
+
+#endif // PQC_MASTER_THESIS_2026_APPLICATIONGUI_H

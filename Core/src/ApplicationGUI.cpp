@@ -8,14 +8,15 @@
 #include "stb_image.h"
 #include <stdio.h>          // printf, fprintf
 #include <stdlib.h>
-#include <iostream>
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 
-// Emedded font
+#include <spdlog/spdlog.h>
+
+// Embedded font
 #include "Roboto-Regular.embed"
 #include "Roboto-Bold.embed"
 #include "Roboto-Italic.embed"
@@ -191,7 +192,6 @@ static void SetupVulkan(ImVector<const char*> instance_extensions) {
     }
 
     // Create Descriptor Pool
-    // If you wish to load e.g. additional textures you may need to alter pools sizes and maxSets.
     {
         VkDescriptorPoolSize pool_sizes[] =
         {
@@ -210,11 +210,8 @@ static void SetupVulkan(ImVector<const char*> instance_extensions) {
     }
 }
 
-// All the ImGui_ImplVulkanH_XXX structures/functions are optional helpers used by the demo.
-// Your real engine/app may not use them.
 static void SetupVulkanWindow(ImGui_ImplVulkanH_Window* wd, VkSurfaceKHR surface, int width, int height)
 {
-    // Check for WSI support
     VkBool32 res;
     vkGetPhysicalDeviceSurfaceSupportKHR(g_PhysicalDevice, g_QueueFamily, surface, &res);
     if (res != VK_TRUE)
@@ -223,22 +220,18 @@ static void SetupVulkanWindow(ImGui_ImplVulkanH_Window* wd, VkSurfaceKHR surface
         exit(-1);
     }
 
-    // Select Surface Format
     const VkFormat requestSurfaceImageFormat[] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8_UNORM, VK_FORMAT_R8G8B8_UNORM };
     const VkColorSpaceKHR requestSurfaceColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR;
     wd->Surface = surface;
     wd->SurfaceFormat = ImGui_ImplVulkanH_SelectSurfaceFormat(g_PhysicalDevice, wd->Surface, requestSurfaceImageFormat, (size_t)IM_COUNTOF(requestSurfaceImageFormat), requestSurfaceColorSpace);
 
-    // Select Present Mode
 #ifdef APP_USE_UNLIMITED_FRAME_RATE
     VkPresentModeKHR present_modes[] = { VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR };
 #else
     VkPresentModeKHR present_modes[] = { VK_PRESENT_MODE_FIFO_KHR };
 #endif
     wd->PresentMode = ImGui_ImplVulkanH_SelectPresentMode(g_PhysicalDevice, wd->Surface, &present_modes[0], IM_COUNTOF(present_modes));
-    //printf("[vulkan] Selected PresentMode = %d\n", wd->PresentMode);
 
-    // Create SwapChain, RenderPass, Framebuffer, etc.
     IM_ASSERT(g_MinImageCount >= 2);
     ImGui_ImplVulkanH_CreateOrResizeWindow(g_Instance, g_PhysicalDevice, g_Device, wd, g_QueueFamily, g_Allocator, width, height, g_MinImageCount, 0);
 }
@@ -248,7 +241,6 @@ static void CleanupVulkan()
     vkDestroyDescriptorPool(g_Device, g_DescriptorPool, g_Allocator);
 
 #ifdef APP_USE_VULKAN_DEBUG_REPORT
-    // Remove the debug report callback
     auto f_vkDestroyDebugReportCallbackEXT = (PFN_vkDestroyDebugReportCallbackEXT)vkGetInstanceProcAddr(g_Instance, "vkDestroyDebugReportCallbackEXT");
     f_vkDestroyDebugReportCallbackEXT(g_Instance, g_DebugReport, g_Allocator);
 #endif // APP_USE_VULKAN_DEBUG_REPORT
@@ -277,7 +269,7 @@ static void FrameRender(ImGui_ImplVulkanH_Window* wd, ImDrawData* draw_data)
 
     ImGui_ImplVulkanH_Frame* fd = &wd->Frames[wd->FrameIndex];
     {
-        err = vkWaitForFences(g_Device, 1, &fd->Fence, VK_TRUE, UINT64_MAX);    // wait indefinitely instead of periodically checking
+        err = vkWaitForFences(g_Device, 1, &fd->Fence, VK_TRUE, UINT64_MAX);
         check_vk_result(err);
 
         err = vkResetFences(g_Device, 1, &fd->Fence);
@@ -304,10 +296,8 @@ static void FrameRender(ImGui_ImplVulkanH_Window* wd, ImDrawData* draw_data)
         vkCmdBeginRenderPass(fd->CommandBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
     }
 
-    // Record dear imgui primitives into command buffer
     ImGui_ImplVulkan_RenderDrawData(draw_data, fd->CommandBuffer);
 
-    // Submit command buffer
     vkCmdEndRenderPass(fd->CommandBuffer);
     {
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -347,13 +337,33 @@ static void FramePresent(ImGui_ImplVulkanH_Window* wd)
         return;
     if (err != VK_SUBOPTIMAL_KHR)
         check_vk_result(err);
-    wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->SemaphoreCount; // Now we can use the next set of semaphores
+    wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->SemaphoreCount;
 }
 
 
 namespace Safira {
 #include "Walnut-Icon.embed"
 #include "WindowImages.embed"
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LoadEmbeddedIcon — replaces the 5 identical decode+construct blocks.
+    //
+    // The old Init() had:
+    //   uint32_t w, h;
+    //   void* data = Image::Decode(g_Xxx, sizeof(g_Xxx), w, h);
+    //   m_IconXxx = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
+    //   free(data);
+    //
+    // repeated for every icon.  This factors out the pattern.
+    // ─────────────────────────────────────────────────────────────────────────
+    std::shared_ptr<Image> ApplicationGUI::LoadEmbeddedIcon(const unsigned char* data,
+                                                            std::size_t size) {
+        uint32_t w, h;
+        void* pixels = Image::Decode(data, size, w, h);
+        auto image = std::make_shared<Image>(w, h, ImageFormat::RGBA, pixels);
+        free(pixels);
+        return image;
+    }
 
     ApplicationGUI::ApplicationGUI(const ApplicationSpecification& specification)
     : m_Specification(specification) {
@@ -375,7 +385,7 @@ namespace Safira {
 		glfwSetErrorCallback(glfw_error_callback);
 		if (!glfwInit())
 		{
-			std::cerr << "Could not initalize GLFW!\n";
+			spdlog::error("Could not initialize GLFW!");
 			return;
 		}
 
@@ -392,7 +402,7 @@ namespace Safira {
     	GLFWmonitor* primaryMonitor = glfwGetPrimaryMonitor();
     	const GLFWvidmode* videoMode = glfwGetVideoMode(primaryMonitor);
 
-    	float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor()); // Valid on GLFW 3.3+ only
+    	float main_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
     	m_WindowHandle = glfwCreateWindow((int)(m_Specification.width * main_scale),
 			(int)(m_Specification.height * main_scale),
 			m_Specification.name.c_str(),
@@ -410,25 +420,14 @@ namespace Safira {
 
     	if (!glfwVulkanSupported())
     	{
-    		std::cerr << "GLFW: Vulkan not supported!\n";
+    		spdlog::error("GLFW: Vulkan not supported!");
     		return;
     	}
 
-    	// Set icon
-    	//GLFWimage icon;
-    	//int channels;
-    	//if (!m_Specification.IconPath.empty())
-    	//{
-    	//	std::string iconPathStr = m_Specification.IconPath.string();
-    	//	icon.pixels = stbi_load(iconPathStr.c_str(), &icon.width, &icon.height, &channels, 4);
-    	//	glfwSetWindowIcon(m_WindowHandle, 1, &icon);
-    	//	stbi_image_free(icon.pixels);
-    	//}
-
     	glfwSetWindowUserPointer(m_WindowHandle, this);
-    	glfwSetTitlebarHitTestCallback(m_WindowHandle, [](GLFWwindow* window, int x, int y, int* hit)
+    	glfwSetTitlebarHitTestCallback(m_WindowHandle, [](GLFWwindow* window, int, int, int* hit)
 		{
-			ApplicationGUI* app = (ApplicationGUI*)glfwGetWindowUserPointer(window);
+			auto* app = static_cast<ApplicationGUI*>(glfwGetWindowUserPointer(window));
 			*hit = app->IsTitleBarHovered();
 		});
 
@@ -457,7 +456,7 @@ namespace Safira {
     	IMGUI_CHECKVERSION();
     	ImGui::CreateContext();
     	ImGuiIO& io = ImGui::GetIO(); (void)io;
-    	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     	// Theme colors
     	UI::SetSafiraTheme();
@@ -472,18 +471,13 @@ namespace Safira {
     	style.FrameRounding = 6.0f;
     	style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
 
-		// Setup Dear ImGui style
-		//ImGui::StyleColorsDark();
-		//ImGui::StyleColorsClassic();
-
     	// Setup scaling
-    	style.ScaleAllSizes(main_scale);        // Bake a fixed style scale. (until we have a solution for dynamic style scaling, changing this requires resetting Style + calling this again)
-    	style.FontScaleDpi = main_scale;        // Set initial font scale. (in docking branch: using io.ConfigDpiScaleFonts=true automatically overrides this for every window depending on the current monitor)
+    	style.ScaleAllSizes(main_scale);
+    	style.FontScaleDpi = main_scale;
 
     	// Setup Platform/Renderer backends
     	ImGui_ImplGlfw_InitForVulkan(m_WindowHandle, true);
     	ImGui_ImplVulkan_InitInfo init_info = {};
-    	//init_info.ApiVersion = VK_API_VERSION_1_3;              // Pass in your value of VkApplicationInfo::apiVersion, otherwise will default to header version.
     	init_info.Instance = g_Instance;
     	init_info.PhysicalDevice = g_PhysicalDevice;
     	init_info.Device = g_Device;
@@ -509,37 +503,12 @@ namespace Safira {
     	s_Fonts["Italic"] = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoItalic, sizeof(g_RobotoItalic), 20.0f, &fontConfig);
     	io.FontDefault = robotoFont;
 
-    	// Load images
-	    {
-			uint32_t w, h;
-			void* data = Image::Decode(g_WalnutIcon, sizeof(g_WalnutIcon), w, h);
-			m_AppHeaderIcon = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
-			free(data);
-	    }
-	    {
-			uint32_t w, h;
-			void* data = Image::Decode(g_WindowMinimizeIcon, sizeof(g_WindowMinimizeIcon), w, h);
-			m_IconMinimize = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
-			free(data);
-	    }
-	    {
-			uint32_t w, h;
-			void* data = Image::Decode(g_WindowMaximizeIcon, sizeof(g_WindowMaximizeIcon), w, h);
-			m_IconMaximize = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
-			free(data);
-	    }
-	    {
-			uint32_t w, h;
-			void* data = Image::Decode(g_WindowRestoreIcon, sizeof(g_WindowRestoreIcon), w, h);
-			m_IconRestore = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
-			free(data);
-	    }
-	    {
-			uint32_t w, h;
-			void* data = Image::Decode(g_WindowCloseIcon, sizeof(g_WindowCloseIcon), w, h);
-			m_IconClose = std::make_shared<Image>(w, h, ImageFormat::RGBA, data);
-			free(data);
-	    }
+    	// Load images — deduplicated via LoadEmbeddedIcon
+    	m_AppHeaderIcon = LoadEmbeddedIcon(g_WalnutIcon,         sizeof(g_WalnutIcon));
+    	m_IconMinimize  = LoadEmbeddedIcon(g_WindowMinimizeIcon, sizeof(g_WindowMinimizeIcon));
+    	m_IconMaximize  = LoadEmbeddedIcon(g_WindowMaximizeIcon, sizeof(g_WindowMaximizeIcon));
+    	m_IconRestore   = LoadEmbeddedIcon(g_WindowRestoreIcon,  sizeof(g_WindowRestoreIcon));
+    	m_IconClose     = LoadEmbeddedIcon(g_WindowCloseIcon,    sizeof(g_WindowCloseIcon));
 
     	glfwShowWindow(m_WindowHandle);
 	}
@@ -595,31 +564,22 @@ namespace Safira {
 		auto* bgDrawList = ImGui::GetBackgroundDrawList();
 		auto* fgDrawList = ImGui::GetForegroundDrawList();
 		bgDrawList->AddRectFilled(titlebarMin, titlebarMax, UI::Colors::Theme::titlebar);
-		// DEBUG TITLEBAR BOUNDS
-		// fgDrawList->AddRect(titlebarMin, titlebarMax, UI::Colors::Theme::invalidPrefab);
 
 		// Logo
 		{
-			const int logoWidth = 48;// m_LogoTex->GetWidth();
-			const int logoHeight = 48;// m_LogoTex->GetHeight();
+			constexpr int logoWidth  = 48;
+			constexpr int logoHeight = 48;
 			const ImVec2 logoOffset(16.0f + windowPadding.x, 5.0f + windowPadding.y + titlebarVerticalOffset);
 			const ImVec2 logoRectStart = { ImGui::GetItemRectMin().x + logoOffset.x, ImGui::GetItemRectMin().y + logoOffset.y };
 			const ImVec2 logoRectMax = { logoRectStart.x + logoWidth, logoRectStart.y + logoHeight };
 			fgDrawList->AddImage(m_AppHeaderIcon->GetDescriptorSet(), logoRectStart, logoRectMax);
 		}
 
-		//ImGui::BeginHorizontal("Titlebar", { ImGui::GetWindowWidth() - windowPadding.y * 2.0f, ImGui::GetFrameHeightWithSpacing() });
-
-		static float moveOffsetX;
-		static float moveOffsetY;
 		const float w = ImGui::GetContentRegionAvail().x;
 		constexpr float buttonsAreaWidth = 94;
 
 		// Title bar drag area
-		// On Windows we hook into the GLFW win32 window internals
-		ImGui::SetCursorPos(ImVec2(windowPadding.x, windowPadding.y + titlebarVerticalOffset)); // Reset cursor pos
-		// DEBUG DRAG BOUNDS
-		// fgDrawList->AddRect(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + w - buttonsAreaWidth, ImGui::GetCursorScreenPos().y + titlebarHeight), UI::Colors::Theme::invalidPrefab);
+		ImGui::SetCursorPos(ImVec2(windowPadding.x, windowPadding.y + titlebarVerticalOffset));
 		ImGui::InvisibleButton("##titleBarDragZone", ImVec2(w - buttonsAreaWidth, titlebarHeight));
 
 		m_TitleBarHovered = ImGui::IsItemHovered();
@@ -628,7 +588,7 @@ namespace Safira {
 		{
 			float windowMousePosY = ImGui::GetMousePos().y - ImGui::GetCursorScreenPos().y;
 			if (windowMousePosY >= 0.0f && windowMousePosY <= 5.0f)
-				m_TitleBarHovered = true; // Account for the top-most pixels which don't register
+				m_TitleBarHovered = true;
 		}
 
 		// Draw Menubar
@@ -650,7 +610,7 @@ namespace Safira {
 			ImVec2 currentCursorPos = ImGui::GetCursorPos();
 			ImVec2 textSize = ImGui::CalcTextSize(m_Specification.name.c_str());
 			ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() * 0.5f - textSize.x * 0.5f, 2.0f + windowPadding.y + 6.0f));
-			ImGui::Text("%s", m_Specification.name.c_str()); // Draw title
+			ImGui::Text("%s", m_Specification.name.c_str());
 			ImGui::SetCursorPos(currentCursorPos);
 		}
 
@@ -658,59 +618,44 @@ namespace Safira {
 		const ImU32 buttonColN = UI::Colors::ColorWithMultipliedValue(UI::Colors::Theme::text, 0.9f);
 		const ImU32 buttonColH = UI::Colors::ColorWithMultipliedValue(UI::Colors::Theme::text, 1.2f);
 		const ImU32 buttonColP = UI::Colors::Theme::textDarker;
-		const float buttonWidth = 14.0f;
-		const float buttonHeight = 14.0f;
+		constexpr float buttonWidth  = 14.0f;
+		constexpr float buttonHeight = 14.0f;
 
 		// Minimize Button
-
 		Spring();
 		UI::ShiftCursorY(8.0f);
 		{
-			const int iconWidth = m_IconMinimize->GetWidth();
-			const int iconHeight = m_IconMinimize->GetHeight();
-			const float padY = (buttonHeight - (float)iconHeight) / 2.0f;
+			const float padY = (buttonHeight - static_cast<float>(m_IconMinimize->GetHeight())) / 2.0f;
 			if (ImGui::InvisibleButton("Minimize", ImVec2(buttonWidth, buttonHeight)))
 			{
-				// TODO: move this stuff to a better place, like Window class
 				if (m_WindowHandle)
-				{
-					ApplicationGUI::Get().QueueEvent([windowHandle = m_WindowHandle]() { glfwIconifyWindow(windowHandle); });
-				}
+					ApplicationGUI::Get().QueueEvent([handle = m_WindowHandle]() { glfwIconifyWindow(handle); });
 			}
-
 			UI::DrawButtonImage(m_IconMinimize, buttonColN, buttonColH, buttonColP, UI::RectExpanded(UI::GetItemRect(), 0.0f, -padY));
 		}
-
 
 		// Maximize Button
 		Spring(-1.0f, 17.0f);
 		UI::ShiftCursorY(8.0f);
 		{
-			const int iconWidth = m_IconMaximize->GetWidth();
-			const int iconHeight = m_IconMaximize->GetHeight();
-
-			const bool isMaximized = IsMaximized();
-
+			const bool maximized = IsMaximized();
 			if (ImGui::InvisibleButton("Maximize", ImVec2(buttonWidth, buttonHeight)))
 			{
-				ApplicationGUI::Get().QueueEvent([isMaximized, windowHandle = m_WindowHandle]()
+				ApplicationGUI::Get().QueueEvent([maximized, handle = m_WindowHandle]()
 				{
-					if (isMaximized)
-						glfwRestoreWindow(windowHandle);
+					if (maximized)
+						glfwRestoreWindow(handle);
 					else
-						glfwMaximizeWindow(windowHandle);
+						glfwMaximizeWindow(handle);
 				});
 			}
-
-			UI::DrawButtonImage(isMaximized ? m_IconRestore : m_IconMaximize, buttonColN, buttonColH, buttonColP);
+			UI::DrawButtonImage(maximized ? m_IconRestore : m_IconMaximize, buttonColN, buttonColH, buttonColP);
 		}
 
 		// Close Button
 		Spring(-1.0f, 15.0f);
 		UI::ShiftCursorY(8.0f);
 		{
-			const int iconWidth = m_IconClose->GetWidth();
-			const int iconHeight = m_IconClose->GetHeight();
 			if (ImGui::InvisibleButton("Close", ImVec2(buttonWidth, buttonHeight)))
 				ApplicationGUI::Get().Close();
 
@@ -718,7 +663,6 @@ namespace Safira {
 		}
 
 		Spring(-1.0f, 18.0f);
-		//ImGui::EndHorizontal();
 
 		outTitlebarHeight = titlebarHeight;
 	}
@@ -762,17 +706,11 @@ namespace Safira {
 		// Main loop
 		while (!glfwWindowShouldClose(m_WindowHandle) && m_Running)
 		{
-			// Poll and handle events (inputs, window resize, etc.)
-			// You can read the io.WantCaptureMouse, io.WantCaptureKeyboard flags to tell if dear imgui wants to use your inputs.
-			// - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application.
-			// - When io.WantCaptureKeyboard is true, do not dispatch keyboard input data to your main application.
-			// Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
 			glfwPollEvents();
 
 			{
-				std::scoped_lock<std::mutex> lock(m_EventQueueMutex);
+				std::scoped_lock lock(m_EventQueueMutex);
 
-				// Process custom event queue
 				while (!m_EventQueue.empty()) {
 					auto& func = m_EventQueue.front();
 					func();
@@ -805,8 +743,6 @@ namespace Safira {
 			ImGui::NewFrame();
 
 			{
-				// We are using the ImGuiWindowFlags_NoDocking flag to make the parent window not dockable into,
-				// because it would be confusing to have two docking targets within each others.
 				ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
 
 				ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -834,11 +770,10 @@ namespace Safira {
 
 				{
 					ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(50, 50, 50, 255));
-					// Draw window border if the window is not maximized
 					if (!isMaximized)
 						UI::RenderWindowOuterBorders(ImGui::GetCurrentWindow());
 
-					ImGui::PopStyleColor(); // ImGuiCol_Border
+					ImGui::PopStyleColor();
 				}
 
 				if (m_Specification.CustomTitlebar)
@@ -850,7 +785,6 @@ namespace Safira {
 				}
 
 				// Dockspace
-				ImGuiIO& io = ImGui::GetIO();
 				ImGuiStyle& style = ImGui::GetStyle();
 				float minWinSizeX = style.WindowMinSize.x;
 				style.WindowMinSize.x = 370.0f;
@@ -915,7 +849,6 @@ namespace Safira {
 	VkCommandBuffer ApplicationGUI::GetCommandBuffer(bool begin) {
     	ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
 
-    	// Use any command queue
     	VkCommandPool command_pool = wd->Frames[wd->FrameIndex].CommandPool;
 
     	VkCommandBufferAllocateInfo cmdBufAllocateInfo = {};
@@ -946,7 +879,6 @@ namespace Safira {
     	auto err = vkEndCommandBuffer(commandBuffer);
     	check_vk_result(err);
 
-    	// Create fence to ensure that the command buffer has finished executing
     	VkFenceCreateInfo fenceCreateInfo = {};
     	fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     	fenceCreateInfo.flags = 0;
@@ -967,11 +899,9 @@ namespace Safira {
     	s_ResourceFreeQueue[s_CurrentFrameIndex].emplace_back(func);
     }
 
-	ImFont* ApplicationGUI::GetFont(const std::string& name) {
-    	if (!s_Fonts.contains(name))
-    		return nullptr;
-
-    	return s_Fonts.at(name);
+	ImFont* ApplicationGUI::GetFont(std::string_view name) {
+    	auto it = s_Fonts.find(std::string(name));
+    	return (it != s_Fonts.end()) ? it->second : nullptr;
     }
 
 	void ApplicationGUI::Spring(float weight, float spacing) {

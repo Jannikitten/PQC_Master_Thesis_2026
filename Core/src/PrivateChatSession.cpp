@@ -1,9 +1,22 @@
 #include "PrivateChatSession.h"
 
-// Use short-form includes — CMake adds botan/install/include/botan-3 to the
-// include path via the Botan::Botan target, so <botan/xyz.h> resolves cleanly.
-// Never use relative ../botan/install/... paths in source files.
+// ═════════════════════════════════════════════════════════════════════════════
+// PrivateChatSession.cpp
+//
+// §3.2   Result types     – std::expected for socket creation pipelines
+// §5.5   Secret lifetimes – UniqueSocket RAII for file descriptors
+// §5.5   Opinionated API  – string_view parameters, no throwing port parse
+// C++23                   – std::array, from_chars, ranges::find, string_view
+// ═════════════════════════════════════════════════════════════════════════════
+
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <chrono>
+#include <format>
+#include <ranges>
+#include <thread>
+
 #include <botan/auto_rng.h>
 #include <botan/certstor.h>
 #include <botan/tls.h>
@@ -18,36 +31,50 @@
 #include <botan/x509cert.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <cstring>
-#include <format>
-#include <spdlog/spdlog.h>
+
 #include <imgui.h>
+#include <spdlog/spdlog.h>
 
 namespace Safira {
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// UniqueSocket
+// ═════════════════════════════════════════════════════════════════════════════
+
+void UniqueSocket::Reset() noexcept {
+    if (m_Fd >= 0) {
+        ::close(m_Fd);
+        m_Fd = -1;
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // PQ TLS 1.3 Policy
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
 class PQPolicy : public Botan::TLS::Default_Policy {
 public:
     [[nodiscard]] Botan::TLS::Protocol_Version min_version() const {
         return Botan::TLS::Protocol_Version::TLS_V13;
     }
-    [[nodiscard]] std::vector<Botan::TLS::Group_Params> key_exchange_groups() const override {
+
+    [[nodiscard]] std::vector<Botan::TLS::Group_Params>
+    key_exchange_groups() const override {
         return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
     }
-    [[nodiscard]] std::vector<Botan::TLS::Group_Params> key_exchange_groups_to_offer() const override {
+
+    [[nodiscard]] std::vector<Botan::TLS::Group_Params>
+    key_exchange_groups_to_offer() const override {
         return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
     }
+
     [[nodiscard]] bool require_cert_revocation_info() const override { return false; }
 
-    // TLS 1.3 only supports RSA-PSS (not PKCS1v15) for authentication.
-    // Botan's default policy includes RSA-PSS but being explicit here ensures
-    // our self-signed RSA cert is accepted regardless of how it was signed.
-    [[nodiscard]] std::vector<Botan::TLS::Signature_Scheme> allowed_signature_schemes() const override {
+    [[nodiscard]] std::vector<Botan::TLS::Signature_Scheme>
+    allowed_signature_schemes() const override {
         return {
             Botan::TLS::Signature_Scheme::RSA_PSS_SHA256,
             Botan::TLS::Signature_Scheme::RSA_PSS_SHA384,
@@ -55,7 +82,7 @@ public:
             Botan::TLS::Signature_Scheme::ECDSA_SHA256,
             Botan::TLS::Signature_Scheme::ECDSA_SHA384,
             Botan::TLS::Signature_Scheme::ECDSA_SHA512,
-            // Botan::TLS::Signature_Scheme::ML_DSA_65,
+            // Phase 2 TODO: Botan::TLS::Signature_Scheme::ML_DSA_65,
             Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA256,
             Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA384,
             Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA512,
@@ -63,93 +90,101 @@ public:
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // ServerCredentials
 //
-// Botan 3 API changes vs Botan 2:
-//   • cert_chain()       → find_cert_chain()
-//   • Private_Key*       → std::shared_ptr<Private_Key>   (private_key_for)
-// ─────────────────────────────────────────────────────────────────────────────
-    class ServerCredentials : public Botan::Credentials_Manager {
-    public:
-        // From in-memory key material (new)
-        explicit ServerCredentials(const P2PKeyMaterial& km)
-            : m_Key(km.Key), m_Cert(km.Cert) {}
+// Botan 3 API: cert_chain() → find_cert_chain(),
+//              Private_Key* → shared_ptr<Private_Key>
+// ═════════════════════════════════════════════════════════════════════════════
 
-        std::vector<Botan::X509_Certificate> find_cert_chain(
-            const std::vector<std::string>& cert_key_types,
-            const std::vector<Botan::AlgorithmIdentifier>&,
-            const std::vector<Botan::X509_DN>&,
-            const std::string& type,
-            const std::string&) override
-        {
-            if (type == "tls-server") {
-                const std::string our_key_type = m_Key->algo_name();
-                if (cert_key_types.empty() ||
-                    std::find(cert_key_types.begin(), cert_key_types.end(), our_key_type)
-                        != cert_key_types.end())
-                    return { *m_Cert };
-            }
-            return {};
+class ServerCredentials : public Botan::Credentials_Manager {
+public:
+    explicit ServerCredentials(const P2PKeyMaterial& km)
+        : m_Key(km.Key), m_Cert(km.Cert) {}
+
+    std::vector<Botan::X509_Certificate> find_cert_chain(
+        const std::vector<std::string>& cert_key_types,
+        const std::vector<Botan::AlgorithmIdentifier>&,
+        const std::vector<Botan::X509_DN>&,
+        const std::string& type,
+        const std::string&) override
+    {
+        if (type == "tls-server") {
+            const std::string our_key_type = m_Key->algo_name();
+            if (cert_key_types.empty()
+                || std::ranges::find(cert_key_types, our_key_type) != cert_key_types.end())
+                return { *m_Cert };
         }
+        return {};
+    }
 
-        std::shared_ptr<Botan::Private_Key> private_key_for(
-            const Botan::X509_Certificate&,
-            const std::string&,
-            const std::string&) override
-        {
-            return m_Key;
-        }
+    std::shared_ptr<Botan::Private_Key> private_key_for(
+        const Botan::X509_Certificate&,
+        const std::string&,
+        const std::string&) override
+    {
+        return m_Key;
+    }
 
-    private:
-        std::shared_ptr<Botan::X509_Certificate> m_Cert;
-        std::shared_ptr<Botan::Private_Key>      m_Key;
-    };
+private:
+    std::shared_ptr<Botan::Private_Key>      m_Key;
+    std::shared_ptr<Botan::X509_Certificate> m_Cert;
+};
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // ClientCredentials — Phase 1: no cert verification
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
 class ClientCredentials : public Botan::Credentials_Manager {
 public:
     std::vector<Botan::Certificate_Store*> trusted_certificate_authorities(
-        const std::string& /*type*/, const std::string& /*context*/) override
+        const std::string&, const std::string&) override
     {
         return {};
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P2PCallbacks
+// ═════════════════════════════════════════════════════════════════════════════
+// P2PCallbacks — Botan TLS channel callbacks
 //
-// Defined inside namespace Safira — matches the forward-declaration in the
-// header.  If this were in the global namespace, RunLoop's P2PCallbacks*
-// parameter would refer to ::P2PCallbacks (global, incomplete) rather than
-// Safira::P2PCallbacks (this class), and the compiler would reject it.
-// ─────────────────────────────────────────────────────────────────────────────
+// Defined inside namespace Safira to match the forward-declaration in the
+// header.
+// ═════════════════════════════════════════════════════════════════════════════
+
 class P2PCallbacks : public Botan::TLS::Callbacks {
 public:
     P2PCallbacks(int socket, PrivateChatSession& owner, std::string peerUsername)
-        : m_Socket(socket), m_Owner(owner), m_PeerUsername(std::move(peerUsername)) {}
+        : m_Socket(socket)
+        , m_Owner(owner)
+        , m_PeerUsername(std::move(peerUsername)) {}
 
     void tls_emit_data(std::span<const uint8_t> data) override {
-        ssize_t total = 0;
-        while (total < static_cast<ssize_t>(data.size())) {
-            const ssize_t sent = ::send(m_Socket, data.data() + total, data.size() - total, 0);
-            if (sent <= 0) { spdlog::error("[P2P] tls_emit_data: send() failed"); return; }
-            total += sent;
+        std::size_t total = 0;
+        while (total < data.size()) {
+            const ssize_t sent = ::send(
+                m_Socket,
+                data.data() + total,
+                data.size() - total, 0);
+            if (sent <= 0) {
+                spdlog::error("[P2P] tls_emit_data: send() failed");
+                return;
+            }
+            total += static_cast<std::size_t>(sent);
         }
     }
 
     void tls_record_received(uint64_t /*seq_no*/,
-                              std::span<const uint8_t> data) override {
-        m_Owner.AppendMessage(m_PeerUsername,
+                             std::span<const uint8_t> data) override {
+        m_Owner.AppendMessage(
+            m_PeerUsername,
             std::string(reinterpret_cast<const char*>(data.data()), data.size()));
     }
 
     void tls_alert(Botan::TLS::Alert alert) override {
         if (alert.type() == Botan::TLS::Alert::CloseNotify) {
             m_Owner.AppendMessage("System",
-                std::format("{} closed the connection.", m_PeerUsername), 0xFF888888);
+                std::format("{} closed the connection.", m_PeerUsername),
+                0xFF888888);
             m_CloseNotifyReceived = true;
         } else {
             spdlog::warn("[P2P] TLS alert: {}", alert.type_string());
@@ -157,26 +192,27 @@ public:
     }
 
     void tls_session_activated() override {
-        spdlog::info("[P2P] TLS 1.3 + X25519/ML-KEM-768 handshake complete with {}", m_PeerUsername);
+        spdlog::info("[P2P] TLS 1.3 + X25519/ML-KEM-768 handshake complete with {}",
+                     m_PeerUsername);
         m_Owner.AppendMessage("System",
             std::format("Connected to {} (Botan TLS 1.3 | X25519/ML-KEM-768)", m_PeerUsername),
             0xFF66CC66);
         m_Activated = true;
     }
 
-    // Phase 1: accept any cert without verification
-    // TODO Phase 2: remove this and provide a real trust store in ClientCredentials
+    // Phase 1: accept any cert without verification.
+    // TODO Phase 2: remove this and provide a real trust store.
     void tls_verify_cert_chain(
-        const std::vector<Botan::X509_Certificate>& /*chain*/,
-        const std::vector<std::optional<Botan::OCSP::Response>>& /*ocsp*/,
-        const std::vector<Botan::Certificate_Store*>& /*trusted*/,
-        Botan::Usage_Type /*usage*/,
-        std::string_view /*hostname*/,
-        const Botan::TLS::Policy& /*policy*/) override
+        const std::vector<Botan::X509_Certificate>&,
+        const std::vector<std::optional<Botan::OCSP::Response>>&,
+        const std::vector<Botan::Certificate_Store*>&,
+        Botan::Usage_Type,
+        std::string_view,
+        const Botan::TLS::Policy&) override
     {}
 
-    bool IsActivated()           const { return m_Activated;           }
-    bool IsCloseNotifyReceived() const { return m_CloseNotifyReceived; }
+    [[nodiscard]] bool IsActivated()           const noexcept { return m_Activated; }
+    [[nodiscard]] bool IsCloseNotifyReceived() const noexcept { return m_CloseNotifyReceived; }
 
 private:
     int                 m_Socket;
@@ -187,105 +223,189 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utility
+// Address parsing — from_chars instead of std::stoi (no-throw, §3.2)
 // ─────────────────────────────────────────────────────────────────────────────
-static std::pair<std::string, uint16_t> SplitAddr(const std::string& addr) {
-    auto colon = addr.rfind(':');
-    if (colon == std::string::npos) return {addr, 0};
+
+struct ParsedAddr {
+    std::string Host;
+    uint16_t    Port = 0;
+};
+
+[[nodiscard]]
+static std::expected<ParsedAddr, P2PError> ParsePeerAddress(std::string_view addr) {
+    const auto colon = addr.rfind(':');
+    if (colon == std::string_view::npos)
+        return std::unexpected(P2PError::AddressParse);
+
+    auto host    = std::string(addr.substr(0, colon));
+    auto portStr = addr.substr(colon + 1);
+
     uint16_t port = 0;
-    try { port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1))); }
-    catch (...) {}
-    return {addr.substr(0, colon), port};
+    auto [ptr, ec] = std::from_chars(portStr.data(), portStr.data() + portStr.size(), port);
+    if (ec != std::errc{} || port == 0)
+        return std::unexpected(P2PError::AddressParse);
+
+    return ParsedAddr{ std::move(host), port };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// §3.2 — Socket init helpers returning std::expected  (Slides 88-89)
+// ═════════════════════════════════════════════════════════════════════════════
+
+std::expected<UniqueSocket, P2PError>
+PrivateChatSession::CreateListenSocket() {
+    UniqueSocket sock{ ::socket(AF_INET, SOCK_STREAM, 0) };
+    if (!sock)
+        return std::unexpected(P2PError::SocketCreation);
+
+    int yes = 1;
+    ::setsockopt(sock.Get(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in local{
+        .sin_family = AF_INET,
+        .sin_port   = 0,           // OS picks an ephemeral port
+        .sin_addr   = { .s_addr = INADDR_ANY },
+        .sin_zero   = {},
+    };
+
+    if (::bind(sock.Get(), reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0)
+        return std::unexpected(P2PError::SocketBind);
+
+    if (::listen(sock.Get(), 1) < 0)
+        return std::unexpected(P2PError::Listen);
+
+    return sock;
+}
+
+std::expected<UniqueSocket, P2PError>
+PrivateChatSession::CreateAndConnectSocket(std::string_view ip, uint16_t port) {
+    UniqueSocket sock{ ::socket(AF_INET, SOCK_STREAM, 0) };
+    if (!sock)
+        return std::unexpected(P2PError::SocketCreation);
+
+    sockaddr_in server{
+        .sin_family = AF_INET,
+        .sin_port   = htons(port),
+        .sin_addr   = {},
+        .sin_zero   = {},
+    };
+    ::inet_pton(AF_INET, std::string(ip).c_str(), &server.sin_addr);
+
+    if (::connect(sock.Get(), reinterpret_cast<sockaddr*>(&server), sizeof(server)) < 0)
+        return std::unexpected(P2PError::TcpConnect);
+
+    return sock;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Ctor / Dtor
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
 PrivateChatSession::PrivateChatSession(std::string peer)
     : m_PeerUsername(std::move(peer)) {}
 
 PrivateChatSession::~PrivateChatSession() { Close(); }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // StartAsResponder
-// ─────────────────────────────────────────────────────────────────────────────
-    uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
-    m_Socket = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (m_Socket < 0) { spdlog::error("[P2P] socket() failed"); return 0; }
+//
+// Uses the std::expected init helper.  On failure the UniqueSocket inside
+// the expected is destroyed, closing the fd — no leak.
+// ═════════════════════════════════════════════════════════════════════════════
 
-    int yes = 1;
-    ::setsockopt(m_Socket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
+    auto listenResult = CreateListenSocket();
+    if (!listenResult) {
+        spdlog::error("[P2P] Responder: {}", Describe(listenResult.error()));
+        return 0;
+    }
 
-    sockaddr_in local{};
-    local.sin_family      = AF_INET;
-    local.sin_port        = 0;
-    local.sin_addr.s_addr = INADDR_ANY;
-    ::bind(m_Socket, reinterpret_cast<sockaddr*>(&local), sizeof(local));
-    ::listen(m_Socket, 1);
-
+    // Query the OS-assigned port.
     sockaddr_in assigned{};
     socklen_t len = sizeof(assigned);
-    ::getsockname(m_Socket, reinterpret_cast<sockaddr*>(&assigned), &len);
-    uint16_t port = ntohs(assigned.sin_port);
+    ::getsockname(listenResult->Get(), reinterpret_cast<sockaddr*>(&assigned), &len);
+    const uint16_t port = ntohs(assigned.sin_port);
+
+    // Transfer listen socket ownership to the session.
+    m_Socket = std::move(*listenResult);
 
     spdlog::info("[P2P] Responder (TCP) listening on port {}", port);
     AppendMessage("System",
         std::format("Waiting for {} — TCP port {} (Botan TLS 1.3)...", m_PeerUsername, port),
         0xFF888888);
 
-    m_Running = true;
-    m_Thread  = std::thread([this, keyType] { ResponderThreadFunc(keyType); });
+    m_Running.store(true, std::memory_order_release);
+    m_Thread = std::thread([this, keyType] { ResponderThreadFunc(keyType); });
     return port;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // StartAsInitiator
-// ─────────────────────────────────────────────────────────────────────────────
-void PrivateChatSession::StartAsInitiator(const std::string& peerAddress) {
-    m_Running = true;
-    m_Thread  = std::thread([this, peerAddress] { InitiatorThreadFunc(peerAddress); });
+// ═════════════════════════════════════════════════════════════════════════════
+
+void PrivateChatSession::StartAsInitiator(std::string_view peerAddress) {
+    m_Running.store(true, std::memory_order_release);
+    m_Thread = std::thread([this, addr = std::string(peerAddress)] {
+        InitiatorThreadFunc(addr);
+    });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // Close
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
 void PrivateChatSession::Close() {
-    m_Running = false;
+    m_Running.store(false, std::memory_order_release);
     if (m_Thread.joinable()) m_Thread.join();
-    if (m_Socket >= 0) { ::close(m_Socket); m_Socket = -1; }
-    m_Connected = false;
+    m_Socket.Reset();
+    m_Connected.store(false, std::memory_order_release);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // Send
-// ─────────────────────────────────────────────────────────────────────────────
-void PrivateChatSession::Send(const std::string& message) {
-    if (!m_Connected) { spdlog::warn("[P2P] Send before handshake complete"); return; }
+// ═════════════════════════════════════════════════════════════════════════════
+
+void PrivateChatSession::Send(std::string_view message) {
+    if (!m_Connected.load(std::memory_order_acquire)) {
+        spdlog::warn("[P2P] Send before handshake complete");
+        return;
+    }
     std::lock_guard lock(m_LogMutex);
-    m_PendingOutbound.push_back(message);
+    m_PendingOutbound.emplace_back(message);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // ResponderThreadFunc
-// ─────────────────────────────────────────────────────────────────────────────
-    void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
-    int listenSock = m_Socket;
+// ═════════════════════════════════════════════════════════════════════════════
+
+void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
+    // Accept one connection, then close the listen socket.
+    // The listen socket is currently owned by m_Socket.  We release it
+    // into a local UniqueSocket so accept() runs on it, then m_Socket
+    // takes ownership of the connection socket.
+    UniqueSocket listenSock = std::move(m_Socket);
+
     sockaddr_in peer{};
     socklen_t peerLen = sizeof(peer);
-    int connSock = ::accept(listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
-    ::close(listenSock);
-    m_Socket = connSock;
+    const int connFd = ::accept(listenSock.Get(),
+                                reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    listenSock.Reset();  // done listening
 
-    if (connSock < 0 || !m_Running) { m_Running = false; return; }
+    if (connFd < 0 || !m_Running.load(std::memory_order_acquire)) {
+        m_Running.store(false, std::memory_order_release);
+        return;
+    }
 
-    char peerIp[INET_ADDRSTRLEN];
-    ::inet_ntop(AF_INET, &peer.sin_addr, peerIp, sizeof(peerIp));
-    spdlog::info("[P2P] TCP accepted from {}:{}", peerIp, ntohs(peer.sin_port));
+    m_Socket = UniqueSocket(connFd);
+
+    std::array<char, INET_ADDRSTRLEN> peerIp{};
+    ::inet_ntop(AF_INET, &peer.sin_addr, peerIp.data(), peerIp.size());
+    spdlog::info("[P2P] TCP accepted from {}:{}", peerIp.data(), ntohs(peer.sin_port));
 
     try {
         auto km          = GenerateP2PCredentials(keyType);
         auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
-        auto callbacks   = std::make_shared<P2PCallbacks>(connSock, *this, m_PeerUsername);
+        auto callbacks   = std::make_shared<P2PCallbacks>(m_Socket.Get(), *this, m_PeerUsername);
         auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng);
         auto creds       = std::make_shared<ServerCredentials>(km);
         auto policy      = std::make_shared<PQPolicy>();
@@ -297,79 +417,86 @@ void PrivateChatSession::Send(const std::string& message) {
         AppendMessage("System", std::format("Error: {}", ex.what()), 0xFF4444FF);
     }
 
-    m_Connected = false;
-    m_Running   = false;
+    m_Connected.store(false, std::memory_order_release);
+    m_Running.store(false, std::memory_order_release);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // InitiatorThreadFunc
-// ─────────────────────────────────────────────────────────────────────────────
+//
+// Uses ParsePeerAddress (from_chars, §3.2) and CreateAndConnectSocket
+// (std::expected, RAII).
+// ═════════════════════════════════════════════════════════════════════════════
+
 void PrivateChatSession::InitiatorThreadFunc(std::string peerAddress) {
-    auto [ip, port] = SplitAddr(peerAddress);
-    if (port == 0 || ip.empty()) {
-        spdlog::error("[P2P] Invalid peer address: {}", peerAddress);
-        m_Running = false; return;
+    auto parsed = ParsePeerAddress(peerAddress);
+    if (!parsed) {
+        spdlog::error("[P2P] {}: '{}'", Describe(parsed.error()), peerAddress);
+        m_Running.store(false, std::memory_order_release);
+        return;
     }
-
-    m_Socket = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (m_Socket < 0) { m_Running = false; return; }
-
-    sockaddr_in server{};
-    server.sin_family = AF_INET;
-    server.sin_port   = htons(port);
-    ::inet_pton(AF_INET, ip.c_str(), &server.sin_addr);
 
     AppendMessage("System",
-        std::format("Connecting to {} at {}:{} (Botan TLS 1.3)...", m_PeerUsername, ip, port),
+        std::format("Connecting to {} at {}:{} (Botan TLS 1.3)...",
+                    m_PeerUsername, parsed->Host, parsed->Port),
         0xFF888888);
 
-    if (::connect(m_Socket, reinterpret_cast<sockaddr*>(&server), sizeof(server)) < 0) {
+    auto sockResult = CreateAndConnectSocket(parsed->Host, parsed->Port);
+    if (!sockResult) {
         spdlog::error("[P2P] TCP connect to {} failed", peerAddress);
         AppendMessage("System", "TCP connect failed.", 0xFF4444FF);
-        m_Running = false; return;
+        m_Running.store(false, std::memory_order_release);
+        return;
     }
+
+    m_Socket = std::move(*sockResult);
 
     try {
         auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
-        auto callbacks   = std::make_shared<P2PCallbacks>(m_Socket, *this, m_PeerUsername);
+        auto callbacks   = std::make_shared<P2PCallbacks>(m_Socket.Get(), *this, m_PeerUsername);
         auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng);
         auto creds       = std::make_shared<ClientCredentials>();
         auto policy      = std::make_shared<PQPolicy>();
 
         Botan::TLS::Client channel(callbacks, session_mgr, creds, policy, rng,
-                                   Botan::TLS::Server_Information(ip, port));
+                                   Botan::TLS::Server_Information(parsed->Host, parsed->Port));
         RunLoop(&channel, callbacks.get());
     } catch (const std::exception& ex) {
         spdlog::error("[P2P] Initiator: {}", ex.what());
         AppendMessage("System", std::format("Error: {}", ex.what()), 0xFF4444FF);
     }
 
-    m_Connected = false;
-    m_Running   = false;
+    m_Connected.store(false, std::memory_order_release);
+    m_Running.store(false, std::memory_order_release);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // RunLoop
-// ─────────────────────────────────────────────────────────────────────────────
-    void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks) {
-    constexpr int kBufSize = 16384;
-    uint8_t recvBuf[kBufSize];
+// ═════════════════════════════════════════════════════════════════════════════
 
-    ::fcntl(m_Socket, F_SETFL, O_NONBLOCK);
+void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel,
+                                 P2PCallbacks* callbacks) {
+    std::array<uint8_t, 16384> recvBuf{};
 
-    while (m_Running && !channel->is_closed()) {
-        ssize_t len = ::recv(m_Socket, recvBuf, sizeof(recvBuf), 0);
+    ::fcntl(m_Socket.Get(), F_SETFL, O_NONBLOCK);
+
+    while (m_Running.load(std::memory_order_acquire) && !channel->is_closed()) {
+
+        const ssize_t len = ::recv(m_Socket.Get(), recvBuf.data(), recvBuf.size(), 0);
         if (len > 0) {
-            channel->received_data(std::span<const uint8_t>(recvBuf, len));
+            channel->received_data(
+                std::span<const uint8_t>(recvBuf.data(), static_cast<std::size_t>(len)));
         } else if (len == 0) {
-            AppendMessage("System", std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
+            AppendMessage("System",
+                std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
             break;
         }
 
-        if (!m_Connected && callbacks->IsActivated())
-            m_Connected = true;
+        if (!m_Connected.load(std::memory_order_acquire) && callbacks->IsActivated())
+            m_Connected.store(true, std::memory_order_release);
 
-        if (m_Connected) {
+        // Drain outbound queue under the lock, then send outside it.
+        if (m_Connected.load(std::memory_order_acquire)) {
             std::vector<std::string> pending;
             { std::lock_guard lock(m_LogMutex); pending.swap(m_PendingOutbound); }
             for (const auto& msg : pending)
@@ -380,47 +507,60 @@ void PrivateChatSession::InitiatorThreadFunc(std::string peerAddress) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    // Send close_notify while the socket is still alive
-    if (m_Socket >= 0 && !channel->is_closed()) {
+    // Send close_notify while the socket is still alive.
+    if (m_Socket && !channel->is_closed()) {
         try { channel->close(); } catch (...) {}
     }
 
-    // Now safe to close the socket
-    if (m_Socket >= 0) { ::close(m_Socket); m_Socket = -1; }
-    m_Connected = false;
+    // Socket closed by RAII or explicitly by the caller (Close / dtor).
+    // We reset it here so the thread doesn't leave a dangling fd for
+    // Close() to double-close.
+    m_Socket.Reset();
+    m_Connected.store(false, std::memory_order_release);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // AppendMessage
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
 void PrivateChatSession::AppendMessage(const std::string& who,
                                        const std::string& text,
                                        uint32_t color) {
     std::lock_guard lock(m_LogMutex);
-    m_Log.push_back({who, text, color});
+    m_Log.push_back({ who, text, color });
     m_ScrollToBottom = true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
 // OnUIRender
-// ─────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
 bool PrivateChatSession::OnUIRender(const std::string& ownUsername, uint32_t /*ownColor*/) {
     if (!m_WindowOpen) return false;
 
-    std::string title = std::format("Private chat — {}###pc_{}", m_PeerUsername, m_PeerUsername);
-    ImGui::SetNextWindowSize({480, 400}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin(title.c_str(), &m_WindowOpen)) { ImGui::End(); return m_WindowOpen; }
+    const std::string title = std::format(
+        "Private chat — {}###pc_{}", m_PeerUsername, m_PeerUsername);
 
-    if (m_Connected)
-        ImGui::TextColored({0.3f, 0.9f, 0.3f, 1.0f}, "● Connected  (Botan TLS 1.3 | X25519/ML-KEM-768)");
-    else if (m_Running)
-        ImGui::TextColored({0.9f, 0.8f, 0.2f, 1.0f}, "● Handshaking...");
+    ImGui::SetNextWindowSize({ 480, 400 }, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(title.c_str(), &m_WindowOpen)) {
+        ImGui::End();
+        return m_WindowOpen;
+    }
+
+    if (m_Connected.load(std::memory_order_acquire))
+        ImGui::TextColored({ 0.3f, 0.9f, 0.3f, 1.0f },
+            "● Connected  (Botan TLS 1.3 | X25519/ML-KEM-768)");
+    else if (m_Running.load(std::memory_order_acquire))
+        ImGui::TextColored({ 0.9f, 0.8f, 0.2f, 1.0f },
+            "● Handshaking...");
     else
-        ImGui::TextColored({0.8f, 0.3f, 0.3f, 1.0f}, "● Disconnected");
+        ImGui::TextColored({ 0.8f, 0.3f, 0.3f, 1.0f },
+            "● Disconnected");
+
     ImGui::Separator();
 
-    float inputH = ImGui::GetFrameHeightWithSpacing() + 8.0f;
-    ImGui::BeginChild("##pc_log", {0, -inputH}, true);
+    const float inputH = ImGui::GetFrameHeightWithSpacing() + 8.0f;
+    ImGui::BeginChild("##pc_log", { 0, -inputH }, true);
     {
         std::lock_guard lock(m_LogMutex);
         for (const auto& e : m_Log) {
@@ -430,19 +570,24 @@ bool PrivateChatSession::OnUIRender(const std::string& ownUsername, uint32_t /*o
             ImGui::TextUnformatted(e.Text.c_str());
             ImGui::PopStyleColor();
         }
-        if (m_ScrollToBottom) { ImGui::SetScrollHereY(1.0f); m_ScrollToBottom = false; }
+        if (m_ScrollToBottom) {
+            ImGui::SetScrollHereY(1.0f);
+            m_ScrollToBottom = false;
+        }
     }
     ImGui::EndChild();
 
     bool sendNow = false;
     ImGui::SetNextItemWidth(-60.0f);
-    if (ImGui::InputText("##pc_input", m_InputBuf, sizeof(m_InputBuf),
-                         ImGuiInputTextFlags_EnterReturnsTrue)) sendNow = true;
+    if (ImGui::InputText("##pc_input", m_InputBuf.data(), m_InputBuf.size(),
+                         ImGuiInputTextFlags_EnterReturnsTrue))
+        sendNow = true;
     ImGui::SameLine();
-    if (ImGui::Button("Send")) sendNow = true;
+    if (ImGui::Button("Send"))
+        sendNow = true;
 
     if (sendNow && m_InputBuf[0] != '\0') {
-        std::string msg(m_InputBuf);
+        std::string msg(m_InputBuf.data());
         Send(msg);
         AppendMessage(ownUsername, msg, 0xFFFFFFFF);
         m_InputBuf[0] = '\0';

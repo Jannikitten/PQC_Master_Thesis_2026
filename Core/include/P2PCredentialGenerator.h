@@ -2,7 +2,7 @@
 #define PQC_MASTER_THESIS_2026_P2PCREDENTIALGENERATOR_H
 
 #include <botan/auto_rng.h>
-#include <botan/pk_algs.h>     // ← create_private_key
+#include <botan/pk_algs.h>
 #include <botan/pk_keys.h>
 #include <botan/x509cert.h>
 #include <botan/x509self.h>

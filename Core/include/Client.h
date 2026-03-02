@@ -1,95 +1,207 @@
 #ifndef PQC_MASTER_THESIS_2026_CLIENT_H
 #define PQC_MASTER_THESIS_2026_CLIENT_H
 
-#include <string>
-#include <thread>
+// ═════════════════════════════════════════════════════════════════════════════
+// Client.h — DTLS 1.3 client with ML-KEM-512 post-quantum key exchange
+//
+// Refactored following Kleppmann & Hugenroth, "Cryptography and Protocol
+// Engineering", Cambridge P79, Lent 2025.
+//
+//  §3.2  Result types     – std::expected with monadic and_then / transform
+//                           for the init pipeline (resolve → socket → TLS).
+//  §3.4  Typestate         – ConnectionPhase = variant<Handshaking, Connected>
+//                           replaces the bare bool m_HandshakeFinished.
+//  §5.5  Secret lifetimes – WolfContext / WolfSession (RAII, from WolfTypes.h)
+//  §5.5  Opinionated API  – "reliable" flag removed; DTLS is best-effort.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#include "WolfTypes.h"
+
 #include <atomic>
+#include <cstdint>
+#include <expected>
 #include <functional>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <variant>
 #include <vector>
+
 #include <../Core/include/Buffer.h>
-#include <wolfssl/options.h>
-#include <wolfssl/ssl.h>
 
 namespace Safira {
-    enum class ConnectionStatus {
-        Disconnected,
-        Connecting,
-        Connected,
-        FailedToConnect,
-    };
 
-    class Client {
-    public:
-        using DataReceivedCallback      = std::function<void(Buffer)>;
-        using ServerConnectedCallback   = std::function<void()>;
-        using ServerDisconnectedCallback= std::function<void()>;
+// ─────────────────────────────────────────────────────────────────────────────
+// Public connection status — consumed by the UI layer.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class ConnectionStatus : uint8_t {
+    Disconnected,
+    Connecting,
+    Connected,
+    FailedToConnect,
+};
 
-        Client()  = default;
-        ~Client();
+// ─────────────────────────────────────────────────────────────────────────────
+// §3.2 — Result types  (Slides 88-89)
+// ─────────────────────────────────────────────────────────────────────────────
+enum class ClientError : uint8_t {
+    AddressParse,
+    HostResolve,
+    SocketCreation,
+    SocketConnect,
+    ContextInit,
+    SessionCreation,
+    HandshakeInit,
+};
 
-        Client(const Client&)            = delete;
-        Client& operator=(const Client&) = delete;
+[[nodiscard]] constexpr std::string_view Describe(ClientError e) noexcept {
+    switch (e) {
+        case ClientError::AddressParse:    return "could not parse host:port";
+        case ClientError::HostResolve:     return "could not resolve hostname";
+        case ClientError::SocketCreation:  return "failed to create UDP socket";
+        case ClientError::SocketConnect:   return "UDP connect() failed";
+        case ClientError::ContextInit:     return "wolfSSL_CTX_new failed";
+        case ClientError::SessionCreation: return "wolfSSL_new failed";
+        case ClientError::HandshakeInit:   return "wolfSSL_connect initiation failed";
+    }
+    return "unknown error";
+}
 
-        // address can be "ip:port" or "hostname:port"
-        void ConnectToServer(const std::string& address);
+// ─────────────────────────────────────────────────────────────────────────────
+// §3.4 — Typestate  (Slides 111-115)
+//
+// Internal network-thread state.  The main loop dispatches via std::visit
+// so the compiler enforces every phase is handled.  Replaces the old
+// m_HandshakeFinished bool.
+// ─────────────────────────────────────────────────────────────────────────────
+struct Handshaking {};
+struct Connected   {};
 
-        // Full disconnect: stops the network thread and blocks until it exits.
-        // Call this from OUTSIDE the network thread (e.g. UI button, app shutdown).
-        void Disconnect();
+using ConnectionPhase = std::variant<Handshaking, Connected>;
 
-        // Signal-only disconnect: sets the stop flag without joining the thread.
-        // Use this from INSIDE a network-thread callback (DataReceived, etc.) to
-        // avoid a thread joining itself (which causes SIGABRT / deadlock).
-        // Also suppresses the outgoing close_notify so the server doesn't receive
-        // a stale UDP packet and mistake it for a new incoming connection.
-        void RequestDisconnect() { m_Running = false; m_SuppressShutdown = true; }
+// ─────────────────────────────────────────────────────────────────────────────
+// §5.5 — Init resources bundle for the monadic pipeline.
+// ─────────────────────────────────────────────────────────────────────────────
+struct ParsedAddress {
+    std::string Host;
+    uint16_t    Port = 0;
+};
 
-        bool IsConnected() const { return m_ConnectionStatus == ConnectionStatus::Connected; }
-        ConnectionStatus GetConnectionStatus() const { return m_ConnectionStatus; }
-        const std::string& GetConnectionDebugMessage() const { return m_ConnectionDebugMessage; }
+struct ClientResources {
+    int         Socket;
+    WolfContext  Ctx;
+    WolfSession  SSL;
+};
 
-        // Only valid after the DTLS handshake finishes (IsConnected() returns true
-        // AND m_HandshakeFinished is set).  Logs a warning otherwise.
-        void SendBuffer(Buffer buffer, bool reliable = true);
-        void SendString(const std::string& str, bool reliable = true);
+// ─────────────────────────────────────────────────────────────────────────────
+// Client
+// ─────────────────────────────────────────────────────────────────────────────
+class Client {
+public:
+    using DataReceivedCallback       = std::function<void(Buffer)>;
+    using ServerConnectedCallback    = std::function<void()>;
+    using ServerDisconnectedCallback = std::function<void()>;
 
-        void SetDataReceivedCallback      (const DataReceivedCallback&);
-        void SetServerConnectedCallback   (const ServerConnectedCallback&);
-        void SetServerDisconnectedCallback(const ServerDisconnectedCallback&);
+    Client()  = default;
+    ~Client();
 
-    private:
-        void NetworkThreadFunc();
-        void OnFatalError(const std::string& msg);
+    Client(const Client&)            = delete;
+    Client& operator=(const Client&) = delete;
 
-        // wolfSSL custom I/O (static C callbacks)
-        static int IOSend(WOLFSSL*, char* buf, int sz, void* ctx);
-        static int IORecv(WOLFSSL*, char* buf, int sz, void* ctx);
+    /// address = "ip:port" or "hostname:port"
+    void ConnectToServer(std::string_view address);
 
-        // ── State ────────────────────────────────────────────────────────────────
-        std::string m_ServerAddress;
+    /// Full disconnect — blocks until the network thread exits.
+    /// Call from outside the network thread (UI, app shutdown).
+    void Disconnect();
 
-        int               m_Socket = -1;
-        std::atomic<bool> m_Running{false};
-        std::thread       m_NetworkThread;
+    /// Signal-only disconnect from inside a network-thread callback.
+    /// Suppresses close_notify to avoid stale packets.
+    void RequestDisconnect() noexcept {
+        m_Running.store(false, std::memory_order_release);
+        m_SuppressShutdown = true;
+    }
 
-        std::atomic<ConnectionStatus> m_ConnectionStatus{ConnectionStatus::Disconnected};
-        std::string                   m_ConnectionDebugMessage;
+    [[nodiscard]] bool IsConnected() const noexcept {
+        return m_ConnectionStatus.load(std::memory_order_acquire)
+               == ConnectionStatus::Connected;
+    }
+    [[nodiscard]] ConnectionStatus GetConnectionStatus() const noexcept {
+        return m_ConnectionStatus.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] const std::string& GetConnectionDebugMessage() const noexcept {
+        return m_ConnectionDebugMessage;
+    }
 
-        WOLFSSL_CTX* m_CTX    = nullptr;
-        WOLFSSL*     m_SSL    = nullptr;
-        bool         m_HandshakeFinished  = false;
-        // Set by RequestDisconnect() to skip wolfSSL_shutdown on the client side
-        // when the server already closed the session (kick / server shutdown).
-        // Prevents a stale close_notify from being misread as a new connection.
-        bool         m_SuppressShutdown   = false;
+    // §5.5 Opinionated API — no "reliable" flag.
+    void Send      (Buffer buf);
+    void SendString(std::string_view str);
 
-        // Raw incoming UDP bytes waiting to be decrypted by wolfSSL
-        std::vector<uint8_t> m_IncomingEncryptedBuffer;
+    void OnDataReceived      (DataReceivedCallback fn);
+    void OnServerConnected   (ServerConnectedCallback fn);
+    void OnServerDisconnected(ServerDisconnectedCallback fn);
 
-        DataReceivedCallback       m_DataReceivedCallback;
-        ServerConnectedCallback    m_ServerConnectedCallback;
-        ServerDisconnectedCallback m_ServerDisconnectedCallback;
-    };
+private:
+    // ── §3.2 + §5.5: Pure-ish init helpers, composed via and_then ───────────
+    [[nodiscard]] static std::expected<ParsedAddress, ClientError>
+        ParseAddress(std::string_view address);
+
+    [[nodiscard]] static std::expected<std::string, ClientError>
+        ResolveHost(const std::string& host);
+
+    [[nodiscard]] static std::expected<int, ClientError>
+        CreateAndConnectSocket(const std::string& ip, uint16_t port);
+
+    [[nodiscard]] std::expected<WolfContext, ClientError>
+        CreateTLSContext() const;
+
+    [[nodiscard]] std::expected<WolfSession, ClientError>
+        CreateSession(WOLFSSL_CTX* ctx, int socket) const;
+
+    /// The full monadic init pipeline.
+    [[nodiscard]] std::expected<ClientResources, ClientError>
+        InitNetwork(std::string_view address) const;
+
+    // ── Network loop ────────────────────────────────────────────────────────
+    void NetworkThreadFunc();
+
+    // §3.4 Typestate dispatch
+    void DriveHandshake();
+    void DriveConnected();
+
+    void OnFatalError(std::string_view msg);
+
+    // wolfSSL custom I/O (static, C-linkage-compatible)
+    static int IOSend(WOLFSSL*, char* buf, int sz, void* ctx);
+    static int IORecv(WOLFSSL*, char* buf, int sz, void* ctx);
+
+    // ── Constants ────────────────────────────────────────────────────────────
+    static constexpr int kDtlsMtu = 1400;
+
+    // ── State ────────────────────────────────────────────────────────────────
+    std::string m_ServerAddress;
+
+    int               m_Socket = -1;
+    std::atomic<bool> m_Running { false };
+    std::thread       m_NetworkThread;
+
+    std::atomic<ConnectionStatus> m_ConnectionStatus { ConnectionStatus::Disconnected };
+    std::string                   m_ConnectionDebugMessage;
+
+    WolfContext  m_Ctx;
+    WolfSession  m_SSL;
+
+    // §3.4 — replaces the old bool m_HandshakeFinished.
+    ConnectionPhase m_Phase { Handshaking{} };
+
+    bool m_SuppressShutdown = false;
+
+    std::vector<uint8_t> m_IncomingEncryptedBuffer;
+
+    DataReceivedCallback       m_OnDataReceived;
+    ServerConnectedCallback    m_OnServerConnected;
+    ServerDisconnectedCallback m_OnServerDisconnected;
+};
 
 } // namespace Safira
-#endif //PQC_MASTER_THESIS_2026_CLIENT_H
+#endif // PQC_MASTER_THESIS_2026_CLIENT_H

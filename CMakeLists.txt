@@ -116,6 +116,7 @@ add_library(CoreLib STATIC
         Core/src/ApplicationConsole.cpp
         Core/src/Console.cpp
         Core/src/PrivateChatSession.cpp
+        Core/include/WolfTypes.h
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
