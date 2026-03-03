@@ -4,15 +4,10 @@
 // ═════════════════════════════════════════════════════════════════════════════
 // ServerLayer.h — application layer sitting above Server
 //
-// Refactored following Kleppmann & Hugenroth, "Cryptography and Protocol
-// Engineering", Cambridge P79, Lent 2025.
-//
-//  §3.2  Result types    – FindClientID returns std::optional<ClientID>,
-//                          not a bare 0 sentinel.
-//  §3.4  Strong types    – ClientID is a struct; no implicit int comparisons.
-//  §5.3  Serialization   – packet builder helper (BuildPacket) centralises
-//                          the scratch-buffer pattern to one call site.
-//  C++23                 – ranges, string_view, structured bindings.
+//  §3.2  Result types    – FindClientID returns std::optional<ClientID>
+//  §3.4  Strong types    – ClientID is a struct; no implicit int comparisons
+//  §5.3  Serialization   – BufferWriter + SerializePacket (concept-based)
+//  C++23                 – ranges, string_view, structured bindings, std::visit
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Layer.h"
@@ -32,15 +27,10 @@ public:
     void OnUIRender()        override;
 
 private:
-    // ── Server event callbacks (signatures match refactored Server) ──────────
+    // ── Server event callbacks ──────────────────────────────────────────────
     void OnClientConnected   (Safira::ClientInfo& clientInfo);
     void OnClientDisconnected(Safira::ClientInfo& clientInfo);
-    void OnDataReceived      (Safira::ClientInfo& clientInfo, Safira::Buffer buffer);
-
-    // ── Incoming message handlers ───────────────────────────────────────────
-    void OnMessageReceived        (const Safira::ClientInfo&, std::string_view message);
-    void OnClientConnectionRequest(const Safira::ClientInfo&, uint32_t userColor, std::string_view username);
-    void OnClientUpdate           (const Safira::ClientInfo&, uint32_t userColor, std::string_view username);
+    void OnDataReceived      (Safira::ClientInfo& clientInfo, Safira::ByteSpan data);
 
     // ── Outgoing packets ────────────────────────────────────────────────────
     void SendClientList                     (const Safira::ClientInfo& clientInfo);
@@ -48,7 +38,6 @@ private:
     void SendClientConnect                  (const Safira::ClientInfo& clientInfo);
     void SendClientDisconnect               (const Safira::ClientInfo& clientInfo);
     void SendClientConnectionRequestResponse(const Safira::ClientInfo&, bool response);
-    void SendClientUpdateResponse           (const Safira::ClientInfo& clientInfo);
     void SendMessageToAllClients            (const Safira::ClientInfo& from, std::string_view message);
     void SendMessageHistory                 (const Safira::ClientInfo& clientInfo);
     void SendServerShutdownToAllClients     ();
@@ -73,15 +62,7 @@ private:
     [[nodiscard]] const std::string& GetClientUsername(Safira::ClientID id) const;
     [[nodiscard]] uint32_t           GetClientColor   (Safira::ClientID id) const;
 
-    // §3.2 — std::optional instead of returning 0 as a "not found" sentinel.
-    // The caller must explicitly check .has_value() before using the ID.
     [[nodiscard]] std::optional<Safira::ClientID> FindClientID(const std::string& username) const;
-
-    // §5.3 — Serialization helper: builds a packet into m_ScratchBuffer and
-    // returns a view over it.  Centralises the write-then-slice pattern so
-    // every Send* method doesn't repeat the boilerplate.
-    template <typename WriteFn>
-    [[nodiscard]] Safira::Buffer BuildPacket(WriteFn&& writeFn);
 
     void SendChatMessage(std::string_view message);
     void SaveMessageHistoryToFile (const std::filesystem::path&);
@@ -97,12 +78,10 @@ private:
     std::vector<Safira::ChatMessage>                     m_MessageHistory;
     std::filesystem::path                                m_MessageHistoryFilePath;
 
-    Safira::Buffer                                       m_ScratchBuffer;
+    Safira::ByteBuffer                                   m_ScratchBuffer;
 
     std::map<Safira::ClientID, Safira::UserInfo>         m_ConnectedClients;
 
-    // Pending private chat invites: responder_username → initiator_ClientID.
-    // Cleared when the responder accepts/declines or either party disconnects.
     std::map<std::string, Safira::ClientID>              m_PendingPrivateChatInvites;
 
     static constexpr float kClientListInterval = 10.0f;

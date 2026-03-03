@@ -30,12 +30,6 @@
 namespace Safira {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visitor helper
-// ─────────────────────────────────────────────────────────────────────────────
-template <typename... Ts>
-struct Overloaded : Ts... { using Ts::operator()...; };
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 [[nodiscard]]
@@ -194,7 +188,7 @@ Client::CreateTLSContext() const {
     if (!ctx)
         return std::unexpected(ClientError::ContextInit);
 
-    // §6.1 PQC — ML-KEM-512 key exchange.
+    // PQC — ML-KEM-512 key exchange (Change this before task begins).
     int groups[] = { WOLFSSL_ML_KEM_512 };
     wolfSSL_CTX_set_groups(ctx.get(), groups, 1);
 
@@ -387,12 +381,13 @@ void Client::DriveConnected() {
 
         if (bytes > 0) {
             if (m_OnDataReceived)
-                m_OnDataReceived(Buffer(plaintext.data(), bytes));
+                m_OnDataReceived(
+                    ByteSpan(reinterpret_cast<const uint8_t*>(plaintext.data()),
+                             static_cast<size_t>(bytes)));
             continue;
         }
 
-        const int err = wolfSSL_get_error(m_SSL.get(), bytes);
-        if (err == WOLFSSL_ERROR_ZERO_RETURN) {
+        if (const int err = wolfSSL_get_error(m_SSL.get(), bytes); err == WOLFSSL_ERROR_ZERO_RETURN) {
             spdlog::info("[client] server closed the connection");
             m_Running.store(false, std::memory_order_release);
         }
@@ -404,20 +399,15 @@ void Client::DriveConnected() {
 // Send — guarded by typestate
 // ═════════════════════════════════════════════════════════════════════════════
 
-void Client::Send(Buffer buf) {
+void Client::Send(ByteSpan buf) {
     if (!m_SSL || !std::holds_alternative<Connected>(m_Phase)) {
         spdlog::warn("[client] send before handshake complete");
         return;
     }
 
-    const int ret = wolfSSL_write(m_SSL.get(), buf.Data, static_cast<int>(buf.Size));
-    if (ret <= 0)
+    if (const int ret = wolfSSL_write(m_SSL.get(), buf.data(), static_cast<int>(buf.size())); ret <= 0)
         spdlog::error("[client] wolfSSL_write failed: {}",
                       wolfSSL_get_error(m_SSL.get(), ret));
-}
-
-void Client::SendString(std::string_view str) {
-    Send(Buffer(str.data(), str.size()));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

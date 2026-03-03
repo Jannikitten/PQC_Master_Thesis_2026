@@ -4,11 +4,8 @@
 // ═════════════════════════════════════════════════════════════════════════════
 // ClientLayer.h — UI and application logic sitting above Client
 //
-// Refactored to match the new Client API (OnXxx callbacks, Send instead of
-// SendBuffer) and apply the same patterns as Server / ServerLayer:
-//
-//  §5.3  Serialization  – BuildPacket centralises scratch-buffer boilerplate
-//  C++23                – ranges, string_view, erase_if
+//  §5.3  Serialization  – BufferWriter + SerializePacket (concept-based)
+//  C++23                – ranges, string_view, erase_if, std::visit
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Layer.h"
@@ -44,7 +41,7 @@ private:
     // ── Server event callbacks ──────────────────────────────────────────────
     void OnConnected();
     void OnDisconnected();
-    void OnDataReceived(Safira::Buffer buffer);
+    void OnDataReceived(Safira::ByteSpan data);
 
     // ── Outgoing ────────────────────────────────────────────────────────────
     void SendChatMessage(std::string_view message);
@@ -55,10 +52,6 @@ private:
     void StartPrivateChatAsInitiator(const std::string& peerUsername,
                                      const std::string& peerAddress);
     void StartPrivateChatAsResponder(const std::string& peerUsername);
-
-    // ── §5.3 — Serialization helper (same pattern as ServerLayer) ───────────
-    template <typename WriteFn>
-    [[nodiscard]] Safira::Buffer BuildPacket(WriteFn&& writeFn);
 
     // ── Persistence ─────────────────────────────────────────────────────────
     void SaveConnectionDetails(const std::filesystem::path& filepath);
@@ -71,7 +64,7 @@ private:
     std::string           m_ServerIP = "127.0.0.1";
     std::filesystem::path m_ConnectionDetailsFilePath = "ConnectionDetails.yaml";
 
-    Safira::Buffer m_ScratchBuffer;
+    Safira::ByteBuffer m_ScratchBuffer;
 
     float    m_ColorBuffer[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     uint8_t  m_IconIndex      = 0;

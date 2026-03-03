@@ -16,6 +16,7 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Common.h"
+#include "Types.h"
 #include "WolfTypes.h"
 
 #include <atomic>
@@ -34,8 +35,6 @@
 #include <netinet/in.h>
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
-
-#include <../Core/include/Buffer.h>
 
 namespace Safira {
 
@@ -115,7 +114,7 @@ struct InitResources {
 // ─────────────────────────────────────────────────────────────────────────────
 class Server {
 public:
-    using DataReceivedCallback       = std::function<void(ClientInfo&, Buffer)>;
+    using DataReceivedCallback       = std::function<void(ClientInfo&, ByteSpan)>;
     using ClientConnectedCallback    = std::function<void(ClientInfo&)>;
     using ClientDisconnectedCallback = std::function<void(ClientInfo&)>;
 
@@ -134,11 +133,8 @@ public:
     }
 
     // §5.5 Opinionated API — no "reliable" flag.
-    void SendToClient    (ClientID id, Buffer buf);
-    void SendToAllClients(Buffer buf, ClientID exclude = {});
-
-    void SendStringToClient    (ClientID id, std::string_view str);
-    void SendStringToAllClients(std::string_view str, ClientID exclude = {});
+    void SendToClient    (ClientID id, ByteSpan buf);
+    void SendToAllClients(ByteSpan buf, ClientID exclude = {});
 
     void KickClient(ClientID id);
 

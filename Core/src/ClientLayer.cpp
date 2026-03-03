@@ -2,14 +2,13 @@
 #include "ServerPacket.h"
 #include "ApplicationGUI.h"
 #include "UI.h"
-#include "BufferStream.h"
 #include "misc/cpp/imgui_stdlib.h"
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ClientLayer.cpp
 //
-// §5.3  Serialization – BuildPacket centralises scratch-buffer boilerplate
-// C++23               – ranges::any_of, erase_if, string_view
+// §5.3  Serialization – BufferWriter + SerializePacket (concept-based)
+// C++23               – ranges::any_of, erase_if, string_view, std::visit
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include <yaml-cpp/yaml.h>
@@ -18,16 +17,6 @@
 #include <ranges>
 
 #include <spdlog/spdlog.h>
-
-// ─────────────────────────────────────────────────────────────────────────────
-// §5.3 — Serialization helper  (same pattern as ServerLayer)
-// ─────────────────────────────────────────────────────────────────────────────
-template <typename WriteFn>
-Safira::Buffer ClientLayer::BuildPacket(WriteFn&& writeFn) {
-    Safira::BufferStreamWriter stream(m_ScratchBuffer);
-    std::forward<WriteFn>(writeFn)(stream);
-    return Safira::Buffer(m_ScratchBuffer, stream.GetStreamPosition());
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -43,14 +32,13 @@ static void DrawIconShape(ImDrawList* draw, ImVec2 center, float radius, uint8_t
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ClientLayer::OnAttach() {
-    m_ScratchBuffer.Allocate(1024);
+    m_ScratchBuffer.resize(1024);
 
     m_Client = std::make_unique<Safira::Client>();
 
-    // Callback names match the refactored Client API.
-    m_Client->OnServerConnected   ([this]()                    { OnConnected();        });
-    m_Client->OnServerDisconnected([this]()                    { OnDisconnected();     });
-    m_Client->OnDataReceived      ([this](Safira::Buffer data) { OnDataReceived(data); });
+    m_Client->OnServerConnected   ([this]()                       { OnConnected();        });
+    m_Client->OnServerDisconnected([this]()                       { OnDisconnected();     });
+    m_Client->OnDataReceived      ([this](Safira::ByteSpan data)  { OnDataReceived(data); });
 
     m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
 
@@ -63,7 +51,6 @@ void ClientLayer::OnDetach() {
     m_PrivateChats.clear();
 
     m_Client->Disconnect();
-    m_ScratchBuffer.Release();
 }
 
 void ClientLayer::OnUIRender() {
@@ -157,17 +144,11 @@ void ClientLayer::UI_ConnectionModal() {
     if (Safira::UI::ButtonCentered("Quit"))
         Safira::ApplicationGUI::Get().Close();
 
-    const auto status = m_Client->GetConnectionStatus();
-
-    if (status == Safira::ConnectionStatus::Connected) {
-        // Send the connection request packet using BuildPacket.
-        auto packet = BuildPacket([&](Safira::BufferStreamWriter& w) {
-            w.WriteRaw<PacketType>(PacketType::ClientConnectionRequest);
-            w.WriteRaw<uint32_t>(m_Color);
-            w.WriteRaw<uint8_t>(m_IconIndex);
-            w.WriteString(m_Username);
-        });
-        m_Client->Send(packet);
+    if (const auto status = m_Client->GetConnectionStatus(); status == Safira::ConnectionStatus::Connected) {
+        Safira::BufferWriter writer(m_ScratchBuffer);
+        Safira::SerializePacket(writer, Safira::ConnectionRequestPacket{
+            m_Color, m_IconIndex, m_Username });
+        m_Client->Send(writer.Written());
 
         SaveConnectionDetails(m_ConnectionDetailsFilePath);
         ImGui::CloseCurrentPopup();
@@ -271,7 +252,6 @@ void ClientLayer::UI_IncomingInvites() {
     }
 
     if (!open) {
-        // User closed via X — treat as decline so the inviter gets unblocked.
         SendPrivateChatResponse(invite.FromUsername, false);
         m_IncomingInvites.erase(m_IncomingInvites.begin());
     }
@@ -282,7 +262,6 @@ void ClientLayer::UI_IncomingInvites() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ClientLayer::UI_PrivateChatWindows() {
-    // Render all sessions, then erase dead ones in a single pass.
     std::erase_if(m_PrivateChats, [this](auto& pair) {
         auto& [peer, session] = pair;
         const bool alive = session->OnUIRender(m_Username, m_Color);
@@ -303,167 +282,113 @@ void ClientLayer::OnDisconnected() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// OnDataReceived — packet dispatch
+// OnDataReceived — variant dispatch via std::visit
+//
+// §3.4  Typestate  – compile-time exhaustive via Overloaded visitor
+// §5.3  Serialization – DeserializeClientPacket returns expected<variant>
 // ═════════════════════════════════════════════════════════════════════════════
 
-void ClientLayer::OnDataReceived(Safira::Buffer buffer) {
-    Safira::BufferStreamReader stream(buffer);
-    PacketType type;
-    stream.ReadRaw<PacketType>(type);
-
-    switch (type) {
-
-    case PacketType::Message: {
-        std::string from, message;
-        stream.ReadString(from);
-        stream.ReadString(message);
-        uint32_t col = m_ConnectedClients.contains(from)
-                       ? m_ConnectedClients.at(from).Color
-                       : 0xFFFFFFFF;
-        if (from == "SERVER") col = 0xFFFFFFFF;
-        m_Console.AddTaggedMessageWithColor(col, from, message);
-        break;
+void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
+    Safira::BufferReader reader(data);
+    auto packet = Safira::DeserializeClientPacket(reader);
+    if (!packet) {
+        spdlog::warn("[client] packet parse error: {}",
+                     Safira::Describe(packet.error()));
+        return;
     }
 
-    case PacketType::ClientConnectionRequest: {
-        bool ok;
-        stream.ReadRaw<bool>(ok);
-        if (ok) {
-            m_ShowSuccessfulConnectionMessage = true;
-        } else {
-            m_Console.AddItalicMessageWithColor(
-                0xFFFA4A4A,
-                "Server rejected connection with username {}", m_Username);
-        }
-        break;
-    }
-
-    case PacketType::ConnectionStatus:
-        break;
-
-    case PacketType::ClientList: {
-        std::vector<Safira::UserInfo> list;
-        stream.ReadArray(list);
-        m_ConnectedClients.clear();
-        for (auto& u : list)
-            m_ConnectedClients[u.Username] = std::move(u);
-        break;
-    }
-
-    case PacketType::ClientConnect: {
-        Safira::UserInfo u;
-        stream.ReadObject(u);
-        m_Console.AddItalicMessageWithColor(u.Color, "Welcome {}!", u.Username);
-        m_ConnectedClients[u.Username] = std::move(u);
-        break;
-    }
-
-    case PacketType::ClientUpdate:
-        break;
-
-    case PacketType::ClientDisconnect: {
-        Safira::UserInfo u;
-        stream.ReadObject(u);
-        m_ConnectedClients.erase(u.Username);
-        m_PrivateChats.erase(u.Username);
-        m_PendingOutgoingInvites.erase(u.Username);
-        m_Console.AddItalicMessageWithColor(u.Color, "Goodbye {}!", u.Username);
-        break;
-    }
-
-    case PacketType::ClientUpdateResponse:
-        break;
-
-    case PacketType::MessageHistory: {
-        std::vector<Safira::ChatMessage> hist;
-        stream.ReadArray(hist);
-        for (const auto& m : hist) {
-            uint32_t col = m_ConnectedClients.contains(m.Username)
-                           ? m_ConnectedClients.at(m.Username).Color
+    std::visit(Safira::Overloaded{
+        [&](const Safira::ServerMessagePacket& pkt) {
+            uint32_t col = m_ConnectedClients.contains(pkt.From)
+                           ? m_ConnectedClients.at(pkt.From).Color
                            : 0xFFFFFFFF;
-            m_Console.AddTaggedMessageWithColor(col, m.Username, m.Message);
-        }
-        if (m_ShowSuccessfulConnectionMessage) {
-            m_ShowSuccessfulConnectionMessage = false;
-            m_Console.AddItalicMessageWithColor(
-                0xFF8A8A8A,
-                "Successfully connected to {} with username {}", m_ServerIP, m_Username);
-        }
-        break;
-    }
+            if (pkt.From == "SERVER") col = 0xFFFFFFFF;
+            m_Console.AddTaggedMessageWithColor(col, pkt.From, pkt.Message);
+        },
+        [&](const Safira::ConnectionResponsePacket& pkt) {
+            if (pkt.Accepted) {
+                m_ShowSuccessfulConnectionMessage = true;
+            } else {
+                m_Console.AddItalicMessageWithColor(
+                    0xFFFA4A4A,
+                    "Server rejected connection with username {}", m_Username);
+            }
+        },
+        [&](const Safira::ClientListPacket& pkt) {
+            m_ConnectedClients.clear();
+            for (const auto& u : pkt.Clients)
+                m_ConnectedClients[u.Username] = u;
+        },
+        [&](const Safira::ClientConnectPacket& pkt) {
+            m_Console.AddItalicMessageWithColor(pkt.Client.Color,
+                                                "Welcome {}!", pkt.Client.Username);
+            m_ConnectedClients[pkt.Client.Username] = pkt.Client;
+        },
+        [&](const Safira::ClientDisconnectPacket& pkt) {
+            m_ConnectedClients.erase(pkt.Client.Username);
+            m_PrivateChats.erase(pkt.Client.Username);
+            m_PendingOutgoingInvites.erase(pkt.Client.Username);
+            m_Console.AddItalicMessageWithColor(pkt.Client.Color,
+                                                "Goodbye {}!", pkt.Client.Username);
+        },
+        [&](const Safira::MessageHistoryPacket& pkt) {
+            for (const auto& m : pkt.Messages) {
+                uint32_t col = m_ConnectedClients.contains(m.Username)
+                               ? m_ConnectedClients.at(m.Username).Color
+                               : 0xFFFFFFFF;
+                m_Console.AddTaggedMessageWithColor(col, m.Username, m.Message);
+            }
+            if (m_ShowSuccessfulConnectionMessage) {
+                m_ShowSuccessfulConnectionMessage = false;
+                m_Console.AddItalicMessageWithColor(
+                    0xFF8A8A8A,
+                    "Successfully connected to {} with username {}", m_ServerIP, m_Username);
+            }
+        },
+        [&](const Safira::ServerShutdownPacket&) {
+            m_Console.AddItalicMessage("Server is shutting down... goodbye!");
+            m_Client->RequestDisconnect();
+        },
+        [&](const Safira::ClientKickPacket& pkt) {
+            m_Console.AddItalicMessage("You have been kicked by server!");
+            if (!pkt.Reason.empty())
+                m_Console.AddItalicMessage("Reason: {}", pkt.Reason);
+            m_Client->RequestDisconnect();
+        },
+        [&](const Safira::PrivateChatInvitePacket& pkt) {
+            const bool alreadyHave = m_PrivateChats.contains(pkt.Username)
+                || std::ranges::any_of(m_IncomingInvites,
+                       [&](const IncomingInvite& i) { return i.FromUsername == pkt.Username; });
 
-    case PacketType::ServerShutdown:
-        m_Console.AddItalicMessage("Server is shutting down... goodbye!");
-        m_Client->RequestDisconnect();
-        break;
-
-    case PacketType::ClientKick: {
-        m_Console.AddItalicMessage("You have been kicked by server!");
-        std::string reason;
-        stream.ReadString(reason);
-        if (!reason.empty())
-            m_Console.AddItalicMessage("Reason: {}", reason);
-        m_Client->RequestDisconnect();
-        break;
-    }
-
-    // ── Private chat signalling ─────────────────────────────────────────────
-    case PacketType::PrivateChatInvite: {
-        std::string from;
-        stream.ReadString(from);
-
-        // Deduplicate: ignore if we already have a session or pending invite.
-        const bool alreadyHave = m_PrivateChats.contains(from)
-            || std::ranges::any_of(m_IncomingInvites,
-                   [&](const IncomingInvite& i) { return i.FromUsername == from; });
-
-        if (!alreadyHave)
-            m_IncomingInvites.push_back({ from });
-        break;
-    }
-
-    case PacketType::PrivateChatConnectTo: {
-        std::string peer, address;
-        stream.ReadString(peer);
-        stream.ReadString(address);
-        m_PendingOutgoingInvites.erase(peer);
-        StartPrivateChatAsInitiator(peer, address);
-        break;
-    }
-
-    case PacketType::PrivateChatDeclined: {
-        std::string peer;
-        stream.ReadString(peer);
-        m_PendingOutgoingInvites.erase(peer);
-        m_Console.AddItalicMessage("{} declined your private chat request.", peer);
-        break;
-    }
-
-    default:
-        break;
-    }
+            if (!alreadyHave)
+                m_IncomingInvites.push_back({ pkt.Username });
+        },
+        [&](const Safira::PrivateChatConnectToPacket& pkt) {
+            m_PendingOutgoingInvites.erase(pkt.PeerUsername);
+            StartPrivateChatAsInitiator(pkt.PeerUsername, pkt.Address);
+        },
+        [&](const Safira::PrivateChatDeclinedPacket& pkt) {
+            m_PendingOutgoingInvites.erase(pkt.PeerUsername);
+            m_Console.AddItalicMessage("{} declined your private chat request.", pkt.PeerUsername);
+        },
+    }, *packet);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// P2P helpers — all using BuildPacket + refactored Client::Send
+// P2P helpers — BufferWriter + SerializePacket
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ClientLayer::SendPrivateChatInvite(const std::string& targetUsername) {
-    auto packet = BuildPacket([&](Safira::BufferStreamWriter& w) {
-        w.WriteRaw<PacketType>(PacketType::PrivateChatInvite);
-        w.WriteString(targetUsername);
-    });
-    m_Client->Send(packet);
+    Safira::BufferWriter writer(m_ScratchBuffer);
+    Safira::SerializePacket(writer, Safira::PrivateChatInvitePacket{ targetUsername });
+    m_Client->Send(writer.Written());
 }
 
 void ClientLayer::SendPrivateChatResponse(const std::string& toUsername, bool accepted) {
-    auto packet = BuildPacket([&](Safira::BufferStreamWriter& w) {
-        w.WriteRaw<PacketType>(PacketType::PrivateChatResponse);
-        w.WriteString(toUsername);
-        w.WriteRaw<bool>(accepted);
-        w.WriteRaw<uint16_t>(0);
-    });
-    m_Client->Send(packet);
+    Safira::BufferWriter writer(m_ScratchBuffer);
+    Safira::SerializePacket(writer, Safira::PrivateChatResponsePacket{
+        toUsername, accepted, 0 });
+    m_Client->Send(writer.Written());
 }
 
 void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
@@ -475,13 +400,10 @@ void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
     }
     m_PrivateChats[peerUsername] = std::move(session);
 
-    auto packet = BuildPacket([&](Safira::BufferStreamWriter& w) {
-        w.WriteRaw<PacketType>(PacketType::PrivateChatResponse);
-        w.WriteString(peerUsername);
-        w.WriteRaw<bool>(true);
-        w.WriteRaw<uint16_t>(port);
-    });
-    m_Client->Send(packet);
+    Safira::BufferWriter writer(m_ScratchBuffer);
+    Safira::SerializePacket(writer, Safira::PrivateChatResponsePacket{
+        peerUsername, true, port });
+    m_Client->Send(writer.Written());
 
     m_Console.AddItalicMessage(
         "Accepted private chat with {}. Waiting for connection...", peerUsername);
@@ -500,14 +422,12 @@ void ClientLayer::StartPrivateChatAsInitiator(const std::string& peerUsername,
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ClientLayer::SendChatMessage(std::string_view message) {
-    const std::string msg(message);
-    if (!IsValidMessage(msg)) return;
+    std::string msg(message);
+    if (!Safira::IsValidMessage(msg)) return;
 
-    auto packet = BuildPacket([&](Safira::BufferStreamWriter& w) {
-        w.WriteRaw<PacketType>(PacketType::Message);
-        w.WriteString(msg);
-    });
-    m_Client->Send(packet);
+    Safira::BufferWriter writer(m_ScratchBuffer);
+    Safira::SerializePacket(writer, Safira::MessagePacket{ msg });
+    m_Client->Send(writer.Written());
 
     m_Console.AddTaggedMessageWithColor(m_Color | 0xFF000000, m_Username, msg);
 }

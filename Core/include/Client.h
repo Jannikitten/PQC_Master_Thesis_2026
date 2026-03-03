@@ -15,6 +15,7 @@
 //  §5.5  Opinionated API  – "reliable" flag removed; DTLS is best-effort.
 // ═════════════════════════════════════════════════════════════════════════════
 
+#include "Types.h"
 #include "WolfTypes.h"
 
 #include <atomic>
@@ -26,8 +27,6 @@
 #include <thread>
 #include <variant>
 #include <vector>
-
-#include <../Core/include/Buffer.h>
 
 namespace Safira {
 
@@ -98,7 +97,7 @@ struct ClientResources {
 // ─────────────────────────────────────────────────────────────────────────────
 class Client {
 public:
-    using DataReceivedCallback       = std::function<void(Buffer)>;
+    using DataReceivedCallback       = std::function<void(ByteSpan)>;
     using ServerConnectedCallback    = std::function<void()>;
     using ServerDisconnectedCallback = std::function<void()>;
 
@@ -134,8 +133,7 @@ public:
     }
 
     // §5.5 Opinionated API — no "reliable" flag.
-    void Send      (Buffer buf);
-    void SendString(std::string_view str);
+    void Send(ByteSpan buf);
 
     void OnDataReceived      (DataReceivedCallback fn);
     void OnServerConnected   (ServerConnectedCallback fn);

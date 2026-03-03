@@ -107,10 +107,7 @@ add_library(CoreLib STATIC
         Core/src/Input.cpp
         Core/src/Client.cpp
         Core/src/UserInfo.cpp
-        Core/src/StreamReader.cpp
-        Core/src/StreamWriter.cpp
         Core/src/ServerPacket.cpp
-        Core/src/BufferStream.cpp
         Core/src/StringUtils.cpp
         Core/src/Server.cpp
         Core/src/ApplicationConsole.cpp

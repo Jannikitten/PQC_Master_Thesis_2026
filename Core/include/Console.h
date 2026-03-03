@@ -4,10 +4,10 @@
 #include <vector>
 #include <string>
 #include <string_view>
+#include <format>
 #include <functional>
 #include <iostream>
-
-#include "spdlog/spdlog.h"
+#include <thread>
 
 class Console {
 public:
@@ -20,14 +20,14 @@ public:
 
 	template<typename... Args>
 	void AddMessage(std::string_view format, Args&&... args) {
-		const std::string messageString = fmt::vformat(format, fmt::make_format_args(args...));
+		const std::string messageString = std::vformat(format, std::make_format_args(args...));
 		std::cout << messageString << std::endl;
 		m_MessageHistory.push_back(messageString);
 	}
 
 	template<typename... Args>
 	void AddItalicMessage(std::string_view format, Args&&... args) {
-		std::string messageString = fmt::vformat(format, fmt::make_format_args(args...));
+		std::string messageString = std::vformat(format, std::make_format_args(args...));
 		MessageInfo info = messageString;
 		info.Italic = true;
 		m_MessageHistory.push_back(info);
@@ -36,21 +36,21 @@ public:
 
 	template<typename... Args>
 	void AddTaggedMessage(std::string_view tag, std::string_view format, Args&&... args) {
-		std::string messageString = fmt::vformat(format, fmt::make_format_args(args...));
+		std::string messageString = std::vformat(format, std::make_format_args(args...));
 		m_MessageHistory.push_back(MessageInfo(std::string(tag), messageString));
 		std::cout << '[' << tag << "] " << messageString << std::endl;
 	}
 
 	template<typename... Args>
 	void AddMessageWithColor(uint32_t color, std::string_view format, Args&&... args) {
-		std::string messageString = fmt::vformat(format, fmt::make_format_args(args...));
+		std::string messageString = std::vformat(format, std::make_format_args(args...));
 		m_MessageHistory.push_back(MessageInfo(messageString, color));
 		std::cout << messageString << std::endl;
 	}
 
 	template<typename... Args>
 	void AddItalicMessageWithColor(uint32_t color, std::string_view format, Args&&... args) {
-		std::string messageString = fmt::vformat(format, fmt::make_format_args(args...));
+		std::string messageString = std::vformat(format, std::make_format_args(args...));
 		MessageInfo info(messageString, color);
 		info.Italic = true;
 		m_MessageHistory.push_back(info);
@@ -59,7 +59,7 @@ public:
 
 	template<typename... Args>
 	void AddTaggedMessageWithColor(uint32_t color, std::string_view tag, std::string_view format, Args&&... args) {
-		std::string messageString = fmt::vformat(format, fmt::make_format_args(args...));
+		std::string messageString = std::vformat(format, std::make_format_args(args...));
 		m_MessageHistory.push_back(MessageInfo(std::string(tag), messageString, color));
 		std::cout << '[' << tag << "] " << messageString << std::endl;
 	}

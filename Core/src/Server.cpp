@@ -27,12 +27,6 @@
 namespace Safira {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visitor helper
-// ─────────────────────────────────────────────────────────────────────────────
-template <typename... Ts>
-struct Overloaded : Ts... { using Ts::operator()...; };
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 [[nodiscard]]
@@ -389,7 +383,9 @@ void Server::DriveConnected(ClientInfo& client) {
 
         if (bytes > 0) {
             if (m_OnDataReceived)
-                m_OnDataReceived(client, Buffer(plaintext.data(), bytes));
+                m_OnDataReceived(client,
+                    ByteSpan(reinterpret_cast<const uint8_t*>(plaintext.data()),
+                             static_cast<size_t>(bytes)));
             continue;
         }
 
@@ -429,7 +425,7 @@ void Server::RemoveClient(ClientID id) {
 // Send — typestate guards
 // ═════════════════════════════════════════════════════════════════════════════
 
-void Server::SendToClient(ClientID id, Buffer buf) {
+void Server::SendToClient(ClientID id, ByteSpan buf) {
     auto it = m_Clients.find(id);
     if (it == m_Clients.end()) return;
 
@@ -441,22 +437,14 @@ void Server::SendToClient(ClientID id, Buffer buf) {
     }
 
     const int ret = wolfSSL_write(
-        client.SSL.get(), buf.Data, static_cast<int>(buf.Size));
+        client.SSL.get(), buf.data(), static_cast<int>(buf.size()));
     if (ret <= 0)
         spdlog::error("wolfSSL_write failed for {}", client.AddressStr);
 }
 
-void Server::SendToAllClients(Buffer buf, ClientID exclude) {
+void Server::SendToAllClients(ByteSpan buf, ClientID exclude) {
     for (auto& [id, _] : m_Clients)
         if (id != exclude) SendToClient(id, buf);
-}
-
-void Server::SendStringToClient(ClientID id, std::string_view str) {
-    SendToClient(id, Buffer(str.data(), str.size()));
-}
-
-void Server::SendStringToAllClients(std::string_view str, ClientID exclude) {
-    SendToAllClients(Buffer(str.data(), str.size()), exclude);
 }
 
 void Server::KickClient(ClientID id) {
