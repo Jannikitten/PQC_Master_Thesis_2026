@@ -531,9 +531,40 @@ void PrivateChatSession::AppendMessage(const std::string& who,
     m_ScrollToBottom = true;
 }
 
+std::vector<ChatEntry>* PrivateChatSession::RefreshAndGetChatEntries(const std::string& ownUsername) {
+    std::lock_guard lock(m_LogMutex);
+    m_CachedEntries = BuildChatEntries(ownUsername);
+    return &m_CachedEntries;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // OnUIRender
 // ═════════════════════════════════════════════════════════════════════════════
+
+std::vector<ChatEntry> PrivateChatSession::BuildChatEntries(const std::string& ownUsername) const {
+    // Must be called under m_LogMutex.
+    std::vector<ChatEntry> entries;
+    entries.reserve(m_Log.size());
+
+    for (const auto& e : m_Log) {
+        MessageRole role;
+        if (e.Who == "System")
+            role = MessageRole::System;
+        else if (e.Who == ownUsername)
+            role = MessageRole::Own;
+        else
+            role = MessageRole::Peer;
+
+        entries.push_back({
+            .Who   = e.Who,
+            .Text  = e.Text,
+            .Color = e.Color,
+            .Role  = role,
+            .Time  = {},
+        });
+    }
+    return entries;
+}
 
 bool PrivateChatSession::OnUIRender(const std::string& ownUsername, uint32_t /*ownColor*/) {
     if (!m_WindowOpen) return false;
@@ -541,57 +572,30 @@ bool PrivateChatSession::OnUIRender(const std::string& ownUsername, uint32_t /*o
     const std::string title = std::format(
         "Private chat — {}###pc_{}", m_PeerUsername, m_PeerUsername);
 
-    ImGui::SetNextWindowSize({ 480, 400 }, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({ 520, 440 }, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin(title.c_str(), &m_WindowOpen)) {
         ImGui::End();
         return m_WindowOpen;
     }
 
-    if (m_Connected.load(std::memory_order_acquire))
-        ImGui::TextColored({ 0.3f, 0.9f, 0.3f, 1.0f },
-            "● Connected  (Botan TLS 1.3 | X25519/ML-KEM-768)");
-    else if (m_Running.load(std::memory_order_acquire))
-        ImGui::TextColored({ 0.9f, 0.8f, 0.2f, 1.0f },
-            "● Handshaking...");
-    else
-        ImGui::TextColored({ 0.8f, 0.3f, 0.3f, 1.0f },
-            "● Disconnected");
-
-    ImGui::Separator();
-
-    const float inputH = ImGui::GetFrameHeightWithSpacing() + 8.0f;
-    ImGui::BeginChild("##pc_log", { 0, -inputH }, true);
+    // Snapshot the log into ChatEntry format under the lock.
     {
         std::lock_guard lock(m_LogMutex);
-        for (const auto& e : m_Log) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImColor(e.Color).Value);
-            ImGui::TextUnformatted((e.Who + ": ").c_str());
-            ImGui::SameLine(0, 0);
-            ImGui::TextUnformatted(e.Text.c_str());
-            ImGui::PopStyleColor();
-        }
-        if (m_ScrollToBottom) {
-            ImGui::SetScrollHereY(1.0f);
-            m_ScrollToBottom = false;
-        }
+        m_CachedEntries = BuildChatEntries(ownUsername);
     }
-    ImGui::EndChild();
 
-    bool sendNow = false;
-    ImGui::SetNextItemWidth(-60.0f);
-    if (ImGui::InputText("##pc_input", m_InputBuf.data(), m_InputBuf.size(),
-                         ImGuiInputTextFlags_EnterReturnsTrue))
-        sendNow = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Send"))
-        sendNow = true;
+    const bool connected   = m_Connected.load(std::memory_order_acquire);
+    const bool handshaking = m_Running.load(std::memory_order_acquire) && !connected;
 
-    if (sendNow && m_InputBuf[0] != '\0') {
-        std::string msg(m_InputBuf.data());
-        Send(msg);
-        AppendMessage(ownUsername, msg, 0xFFFFFFFF);
-        m_InputBuf[0] = '\0';
-        ImGui::SetKeyboardFocusHere(-1);
+    // Render status bar + message bubbles + input bar.
+    m_ChatPanel.RenderChatArea(
+        m_CachedEntries, ownUsername, m_PeerUsername,
+        connected, handshaking);
+
+    // If the user submitted a message via the input bar, send it.
+    if (auto msg = m_ChatPanel.ConsumePendingMessage()) {
+        Send(*msg);
+        AppendMessage(ownUsername, *msg, 0xFFFFFFFF);
     }
 
     ImGui::End();

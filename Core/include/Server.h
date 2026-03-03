@@ -48,6 +48,7 @@ enum class ServerError : uint8_t {
     CertificateLoad,
     PrivateKeyLoad,
     SessionCreation,
+    CertificateGeneration,
 };
 
 [[nodiscard]] constexpr std::string_view Describe(ServerError e) noexcept {
@@ -58,6 +59,7 @@ enum class ServerError : uint8_t {
         case ServerError::CertificateLoad: return "failed to load server.pem";
         case ServerError::PrivateKeyLoad:  return "failed to load server-key.pem";
         case ServerError::SessionCreation: return "wolfSSL_new returned nullptr";
+        case ServerError::CertificateGeneration: return "failed to generate self-signed certificate";
     }
     return "unknown error";
 }
@@ -109,6 +111,11 @@ struct InitResources {
     WolfContext Ctx;
 };
 
+struct GeneratedCredentials {
+    std::vector<uint8_t> CertDer;
+    std::vector<uint8_t> KeyDer;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Server
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +156,7 @@ private:
     [[nodiscard]] std::expected<WolfContext, ServerError>      CreateTLSContext() const;
     [[nodiscard]] std::expected<WolfSession, ServerError>      CreateSession() const;
     [[nodiscard]] std::expected<InitResources, ServerError>    InitNetwork() const;
+    [[nodiscard]] std::expected<GeneratedCredentials, ServerError> GenerateSelfSignedCert() const;
 
     void NetworkThreadFunc();
     void DispatchPacket(const sockaddr_in& from, std::span<const uint8_t> data);

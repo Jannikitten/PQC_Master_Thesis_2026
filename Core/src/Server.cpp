@@ -22,6 +22,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <wolfssl/wolfcrypt/rsa.h>
+#include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/random.h>
+
 #include <spdlog/spdlog.h>
 
 namespace Safira {
@@ -150,20 +154,27 @@ std::expected<WolfContext, ServerError> Server::CreateTLSContext() const {
     if (!ctx)
         return std::unexpected(ServerError::ContextInit);
 
-    // §6.1 PQC — ML-KEM-512 key exchange
     int groups[] = { WOLFSSL_ML_KEM_512 };
     wolfSSL_CTX_set_groups(ctx.get(), groups, 1);
 
     wolfSSL_CTX_SetIORecv(ctx.get(), IORecv);
     wolfSSL_CTX_SetIOSend(ctx.get(), IOSend);
 
-    // Phase 1: classical RSA cert.  Phase 2 TODO: ML-DSA-65.
-    if (wolfSSL_CTX_use_certificate_file(ctx.get(), "server.pem",
-            WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS)
+    // ── Generate cert + key in memory ───────────────────────────────────
+    auto creds = GenerateSelfSignedCert();
+    if (!creds)
+        return std::unexpected(creds.error());
+
+    if (wolfSSL_CTX_use_certificate_buffer(
+            ctx.get(), creds->CertDer.data(),
+            static_cast<long>(creds->CertDer.size()),
+            WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS)
         return std::unexpected(ServerError::CertificateLoad);
 
-    if (wolfSSL_CTX_use_PrivateKey_file(ctx.get(), "server-key.pem",
-            WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS)
+    if (wolfSSL_CTX_use_PrivateKey_buffer(
+            ctx.get(), creds->KeyDer.data(),
+            static_cast<long>(creds->KeyDer.size()),
+            WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS)
         return std::unexpected(ServerError::PrivateKeyLoad);
 
     return ctx;
@@ -192,6 +203,63 @@ std::expected<InitResources, ServerError> Server::InitNetwork() const {
                     return { sock, std::move(ctx) };
                 });
         });
+}
+
+std::expected<GeneratedCredentials, ServerError> Server::GenerateSelfSignedCert() const {
+    // ── RNG ─────────────────────────────────────────────────────────────
+    WC_RNG rng;
+    if (wc_InitRng(&rng) != 0)
+        return std::unexpected(ServerError::CertificateGeneration);
+
+    // ── RSA key pair ────────────────────────────────────────────────────
+    RsaKey key;
+    if (wc_InitRsaKey(&key, nullptr) != 0) {
+        wc_FreeRng(&rng);
+        return std::unexpected(ServerError::CertificateGeneration);
+    }
+
+    if (wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0) {
+        wc_FreeRsaKey(&key);
+        wc_FreeRng(&rng);
+        return std::unexpected(ServerError::CertificateGeneration);
+    }
+
+    // ── Export private key to DER ───────────────────────────────────────
+    std::vector<uint8_t> keyDer(4096);
+    int keySz = wc_RsaKeyToDer(&key, keyDer.data(),
+                                static_cast<word32>(keyDer.size()));
+    if (keySz < 0) {
+        wc_FreeRsaKey(&key);
+        wc_FreeRng(&rng);
+        return std::unexpected(ServerError::CertificateGeneration);
+    }
+    keyDer.resize(static_cast<size_t>(keySz));
+
+    // ── Self-signed X.509 certificate ───────────────────────────────────
+    Cert cert;
+    wc_InitCert(&cert);
+    std::strncpy(cert.subject.commonName, "Safira DTLS Server", CTC_NAME_SIZE);
+    cert.isCA    = 0;
+    cert.sigType = CTC_SHA256wRSA;
+    cert.daysValid = 365;
+
+    std::vector<uint8_t> certDer(4096);
+    int certSz = wc_MakeSelfCert(&cert, certDer.data(),
+                                  static_cast<word32>(certDer.size()),
+                                  &key, &rng);
+
+    wc_FreeRsaKey(&key);
+    wc_FreeRng(&rng);
+
+    if (certSz < 0)
+        return std::unexpected(ServerError::CertificateGeneration);
+
+    certDer.resize(static_cast<size_t>(certSz));
+
+    return GeneratedCredentials {
+        .CertDer = std::move(certDer),
+        .KeyDer  = std::move(keyDer),
+    };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

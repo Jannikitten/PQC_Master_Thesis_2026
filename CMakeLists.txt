@@ -42,6 +42,8 @@ set(WOLFSSL_DTLS_CH_FRAG ON CACHE BOOL "" FORCE)
 set(WOLFSSL_USER_IO      ON CACHE BOOL "" FORCE)
 set(WOLFSSL_EXAMPLES     OFF CACHE BOOL "" FORCE)
 set(WOLFSSL_CRYPT_TESTS  OFF CACHE BOOL "" FORCE)
+set(WOLFSSL_KEYGEN       ON CACHE BOOL "" FORCE)
+set(WOLFSSL_CERTGEN      ON CACHE BOOL "" FORCE)
 
 add_subdirectory(wolfssl)
 
@@ -113,7 +115,8 @@ add_library(CoreLib STATIC
         Core/src/ApplicationConsole.cpp
         Core/src/Console.cpp
         Core/src/PrivateChatSession.cpp
-        Core/include/WolfTypes.h
+        Core/src/ChatPanel.cpp
+        Core/include/ChatPanel.h
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,6 +172,8 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 WOLFSSL_DTLS13
                 WOLFSSL_DTLS_MTU
                 WOLFSSL_DTLS_CH_FRAG
+                WOLFSSL_KEY_GEN
+                WOLFSSL_CERT_GEN
                 HAVE_MLKEM
                 HAVE_MLDSA
                 WOLFSSL_EXTRA

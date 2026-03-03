@@ -61,6 +61,7 @@ public:
     [[nodiscard]] float                   GetTime();
     [[nodiscard]] GLFWwindow*             GetWindowHandle()    const { return m_WindowHandle; }
     [[nodiscard]] bool                    IsTitleBarHovered()  const { return m_TitleBarHovered; }
+    [[nodiscard]] bool                    IsChatPanelVisible() const { return m_ChatPanelVisible; }
     [[nodiscard]] std::shared_ptr<Image>  GetApplicationIcon() const { return m_AppHeaderIcon; }
 
     static VkInstance       GetInstance();
@@ -86,6 +87,7 @@ private:
 
     void UI_DrawTitlebar(float& outTitlebarHeight);
     void UI_DrawMenubar();
+    void DrawFadedLogo();
 
     /// Decode an embedded PNG byte array into a GPU-uploaded Image.
     static std::shared_ptr<Image> LoadEmbeddedIcon(const unsigned char* data, std::size_t size);
@@ -103,6 +105,7 @@ private:
     float m_LastFrameTime = 0.0f;
 
     bool m_TitleBarHovered = false;
+    bool m_ChatPanelVisible = true;
 
     std::vector<std::shared_ptr<Layer>> m_LayerStack;
     std::function<void()>               m_MenubarCallback;

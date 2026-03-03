@@ -1,21 +1,12 @@
 #ifndef PQC_MASTER_THESIS_2026_PRIVATECHATSESSION_H
 #define PQC_MASTER_THESIS_2026_PRIVATECHATSESSION_H
 
-// ═════════════════════════════════════════════════════════════════════════════
-// PrivateChatSession.h — peer-to-peer TLS 1.3 chat via Botan
-//                        (X25519/ML-KEM-768 key exchange)
-//
-// Refactored following Kleppmann & Hugenroth, "Cryptography and Protocol
-// Engineering", Cambridge P79, Lent 2025.
-//
-//  §3.2  Result types     – std::expected for the responder init pipeline
-//  §5.5  Secret lifetimes – UniqueSocket RAII wrapper for file descriptors
-//  §5.5  Opinionated API  – Send takes string_view, not const string&
-//  C++23                  – std::array, string_view, from_chars
-// ═════════════════════════════════════════════════════════════════════════════
+// PrivateChatSession.h -- peer-to-peer TLS 1.3 chat via Botan
+//                         (X25519/ML-KEM-768 key exchange)
 
 #include <algorithm>
 #include "P2PCredentialGenerator.h"
+#include "ChatPanel.h"
 
 #include <array>
 #include <atomic>
@@ -33,13 +24,6 @@ namespace Botan::TLS { class Channel; }
 
 namespace Safira {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// §5.5 — RAII socket wrapper  (Slides 222-224)
-//
-// Every error path in the original code risked leaking a file descriptor.
-// UniqueSocket ensures ::close() is called exactly once, and the
-// .Release() escape hatch supports the responder's listen→accept swap.
-// ─────────────────────────────────────────────────────────────────────────────
 class UniqueSocket {
 public:
     UniqueSocket() = default;
@@ -60,19 +44,13 @@ public:
     [[nodiscard]] int    Get()   const noexcept { return m_Fd; }
     [[nodiscard]] explicit operator bool() const noexcept { return m_Fd >= 0; }
 
-    /// Release ownership — returns the raw fd without closing it.
     int Release() noexcept { int fd = m_Fd; m_Fd = -1; return fd; }
-
-    /// Close the fd and reset to -1.
     void Reset() noexcept;
 
 private:
     int m_Fd = -1;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// §3.2 — Result types for the responder init pipeline
-// ─────────────────────────────────────────────────────────────────────────────
 enum class P2PError : uint8_t {
     SocketCreation,
     SocketBind,
@@ -92,12 +70,8 @@ enum class P2PError : uint8_t {
     return "unknown error";
 }
 
-// Forward-declared inside namespace Safira so RunLoop's parameter type matches.
 class P2PCallbacks;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PrivateChatSession
-// ─────────────────────────────────────────────────────────────────────────────
 class PrivateChatSession {
 public:
     explicit PrivateChatSession(std::string peerUsername);
@@ -112,16 +86,22 @@ public:
     void Close();
 
     [[nodiscard]] bool IsConnected() const noexcept { return m_Connected.load(std::memory_order_acquire); }
+    [[nodiscard]] bool IsRunning() const noexcept { return m_Running.load(std::memory_order_acquire); }
     [[nodiscard]] bool IsClosed()    const noexcept { return !m_Running.load(std::memory_order_acquire); }
     [[nodiscard]] const std::string& GetPeerUsername() const noexcept { return m_PeerUsername; }
 
     void Send(std::string_view message);
+    std::vector<ChatEntry> BuildChatEntries(const std::string& ownUsername) const;
     bool OnUIRender(const std::string& ownUsername, uint32_t ownColor);
     void AppendMessage(const std::string& who, const std::string& text,
                        uint32_t color = 0xFFFFFFFF);
 
+    /// Thread-safe: locks m_LogMutex, rebuilds cached entries, returns pointer.
+    /// The returned pointer is stable until the next call to this method.
+    /// Used by ClientLayer::RebuildConversationList().
+    std::vector<ChatEntry>* RefreshAndGetChatEntries(const std::string& ownUsername);
+
 private:
-    // §3.2 — Pure-ish init helpers returning std::expected.
     [[nodiscard]] static std::expected<UniqueSocket, P2PError>
         CreateListenSocket();
 
@@ -132,7 +112,6 @@ private:
     void InitiatorThreadFunc(std::string peerAddress);
     void RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks);
 
-    // ── State ────────────────────────────────────────────────────────────────
     std::string   m_PeerUsername;
     UniqueSocket  m_Socket;
 
@@ -153,6 +132,8 @@ private:
     std::array<char, 512> m_InputBuf {};
     bool                  m_WindowOpen     = true;
     bool                  m_ScrollToBottom = false;
+    ChatPanel              m_ChatPanel;
+    std::vector<ChatEntry> m_CachedEntries;
 };
 
 } // namespace Safira

@@ -1,21 +1,16 @@
 #ifndef PQC_MASTER_THESIS_2026_CLIENTLAYER_H
 #define PQC_MASTER_THESIS_2026_CLIENTLAYER_H
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ClientLayer.h — UI and application logic sitting above Client
-//
-//  §5.3  Serialization  – BufferWriter + SerializePacket (concept-based)
-//  C++23                – ranges, string_view, erase_if, std::visit
-// ═════════════════════════════════════════════════════════════════════════════
-
 #include "Layer.h"
 #include "Client.h"
 #include "ConsoleGUI.h"
 #include "UserInfo.h"
 #include "PrivateChatSession.h"
+#include "ChatPanel.h"
 
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <set>
 #include <string>
@@ -31,33 +26,32 @@ public:
     void OnDisconnectButton();
 
 private:
-    // ── UI ──────────────────────────────────────────────────────────────────
     void UI_ConnectionModal();
-    void UI_ClientList();
     void UI_IncomingInvites();
-    void UI_PrivateChatWindows();
+    void UI_UnifiedChatWindow();
+    void UI_UserListSection(float width);
     void DrawUserIcon(uint8_t iconIndex, float size, bool clickable = false);
 
-    // ── Server event callbacks ──────────────────────────────────────────────
+    void RebuildConversationList();
+    void AddLobbyMessage(const std::string& who, const std::string& text,
+                         uint32_t color,
+                         Safira::MessageRole role = Safira::MessageRole::Peer);
+
     void OnConnected();
     void OnDisconnected();
     void OnDataReceived(Safira::ByteSpan data);
 
-    // ── Outgoing ────────────────────────────────────────────────────────────
     void SendChatMessage(std::string_view message);
     void SendPrivateChatInvite(const std::string& targetUsername);
     void SendPrivateChatResponse(const std::string& toUsername, bool accepted);
 
-    // ── P2P helpers ─────────────────────────────────────────────────────────
     void StartPrivateChatAsInitiator(const std::string& peerUsername,
                                      const std::string& peerAddress);
     void StartPrivateChatAsResponder(const std::string& peerUsername);
 
-    // ── Persistence ─────────────────────────────────────────────────────────
     void SaveConnectionDetails(const std::filesystem::path& filepath);
     bool LoadConnectionDetails(const std::filesystem::path& filepath);
 
-    // ── Data ────────────────────────────────────────────────────────────────
     std::unique_ptr<Safira::Client>  m_Client;
     Safira::UI::ConsoleGUI           m_Console { "Chat" };
 
@@ -76,7 +70,13 @@ private:
     bool m_ConnectionModalOpen             = false;
     bool m_ShowSuccessfulConnectionMessage = false;
 
-    // ── Private chat state ──────────────────────────────────────────────────
+    Safira::ChatPanel                     m_ChatPanel;
+    std::vector<Safira::ChatEntry>        m_LobbyMessages;
+    std::mutex                            m_LobbyMutex;
+    std::vector<Safira::ChatEntry>        m_LobbySnapshot;
+    std::vector<Safira::ConversationInfo> m_ConversationList;
+    int                                   m_ActiveConvoIdx = 0;
+
     struct IncomingInvite {
         std::string FromUsername;
     };
