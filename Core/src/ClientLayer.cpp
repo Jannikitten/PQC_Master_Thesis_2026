@@ -69,7 +69,7 @@ void ClientLayer::OnAttach() {
     m_Client->OnServerDisconnected([this]()                       { OnDisconnected();     });
     m_Client->OnDataReceived      ([this](Safira::ByteSpan data)  { OnDataReceived(data); });
 
-    m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
+    //m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
 
     LoadConnectionDetails(m_ConnectionDetailsFilePath);
 }
@@ -575,7 +575,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
 // =========================================================================
 
 void ClientLayer::OnConnected() {
-    m_Console.ClearLog();
+    // m_Console.ClearLog();
     {
         std::lock_guard<std::mutex> lock(m_LobbyMutex);
         m_LobbyMessages.clear();
@@ -583,7 +583,7 @@ void ClientLayer::OnConnected() {
 }
 
 void ClientLayer::OnDisconnected() {
-    m_Console.AddItalicMessageWithColor(0xFF8A8A8A, "Lost connection to server!");
+    // m_Console.AddItalicMessageWithColor(0xFF8A8A8A, "Lost connection to server!");
     AddLobbyMessage("System", "Lost connection to server!",
                     0xFF888888, Safira::MessageRole::System);
     m_IncomingInvites.clear();
@@ -609,7 +609,7 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                            ? m_ConnectedClients.at(pkt.From).Color
                            : 0xFFFFFFFF;
             if (pkt.From == "SERVER") col = 0xFFFFFFFF;
-            m_Console.AddTaggedMessageWithColor(col, pkt.From, pkt.Message);
+            // m_Console.AddTaggedMessageWithColor(col, pkt.From, pkt.Message);
 
             // Skip lobby add for own messages — SendChatMessage() already
             // added them locally for instant feedback.
@@ -624,9 +624,9 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
             if (pkt.Accepted) {
                 m_ShowSuccessfulConnectionMessage = true;
             } else {
-                m_Console.AddItalicMessageWithColor(
-                    0xFFFA4A4A,
-                    "Server rejected connection with username {}", m_Username);
+                //m_Console.AddItalicMessageWithColor(
+                //    0xFFFA4A4A,
+                //    "Server rejected connection with username {}", m_Username);
                 AddLobbyMessage("System",
                     std::format("Server rejected username {}", m_Username),
                     0xFFFA4A4A, Safira::MessageRole::System);
@@ -638,8 +638,8 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                 m_ConnectedClients[u.Username] = u;
         },
         [&](const Safira::ClientConnectPacket& pkt) {
-            m_Console.AddItalicMessageWithColor(pkt.Client.Color,
-                                                "Welcome {}!", pkt.Client.Username);
+            //m_Console.AddItalicMessageWithColor(pkt.Client.Color,
+            //                                    "Welcome {}!", pkt.Client.Username);
             m_ConnectedClients[pkt.Client.Username] = pkt.Client;
             AddLobbyMessage("System",
                 std::format("Welcome {}!", pkt.Client.Username),
@@ -649,8 +649,8 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
             m_ConnectedClients.erase(pkt.Client.Username);
             m_PrivateChats.erase(pkt.Client.Username);
             m_PendingOutgoingInvites.erase(pkt.Client.Username);
-            m_Console.AddItalicMessageWithColor(pkt.Client.Color,
-                                                "Goodbye {}!", pkt.Client.Username);
+            //m_Console.AddItalicMessageWithColor(pkt.Client.Color,
+            //                                    "Goodbye {}!", pkt.Client.Username);
             AddLobbyMessage("System",
                 std::format("Goodbye {}!", pkt.Client.Username),
                 0xFF888888, Safira::MessageRole::System);
@@ -660,7 +660,7 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                 uint32_t col = m_ConnectedClients.contains(m.Username)
                                ? m_ConnectedClients.at(m.Username).Color
                                : 0xFFFFFFFF;
-                m_Console.AddTaggedMessageWithColor(col, m.Username, m.Message);
+                //m_Console.AddTaggedMessageWithColor(col, m.Username, m.Message);
 
                 Safira::MessageRole role = (m.Username == m_Username)
                     ? Safira::MessageRole::Own
@@ -669,27 +669,27 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
             }
             if (m_ShowSuccessfulConnectionMessage) {
                 m_ShowSuccessfulConnectionMessage = false;
-                m_Console.AddItalicMessageWithColor(
-                    0xFF8A8A8A,
-                    "Successfully connected to {} with username {}",
-                    m_ServerIP, m_Username);
+                //m_Console.AddItalicMessageWithColor(
+                //    0xFF8A8A8A,
+                //    "Successfully connected to {} with username {}",
+                //    m_ServerIP, m_Username);
                 AddLobbyMessage("System",
                     std::format("Connected to {} as {}", m_ServerIP, m_Username),
                     0xFF888888, Safira::MessageRole::System);
             }
         },
         [&](const Safira::ServerShutdownPacket&) {
-            m_Console.AddItalicMessage("Server is shutting down... goodbye!");
+            //m_Console.AddItalicMessage("Server is shutting down... goodbye!");
             AddLobbyMessage("System", "Server is shutting down...",
                             0xFF888888, Safira::MessageRole::System);
             m_Client->RequestDisconnect();
         },
         [&](const Safira::ClientKickPacket& pkt) {
-            m_Console.AddItalicMessage("You have been kicked by server!");
+            //m_Console.AddItalicMessage("You have been kicked by server!");
             AddLobbyMessage("System", "You have been kicked!",
                             0xFFFA4A4A, Safira::MessageRole::System);
             if (!pkt.Reason.empty()) {
-                m_Console.AddItalicMessage("Reason: {}", pkt.Reason);
+                //m_Console.AddItalicMessage("Reason: {}", pkt.Reason);
                 AddLobbyMessage("System",
                     std::format("Reason: {}", pkt.Reason),
                     0xFFFA4A4A, Safira::MessageRole::System);
@@ -711,8 +711,8 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
         },
         [&](const Safira::PrivateChatDeclinedPacket& pkt) {
             m_PendingOutgoingInvites.erase(pkt.PeerUsername);
-            m_Console.AddItalicMessage(
-                "{} declined your private chat request.", pkt.PeerUsername);
+            //m_Console.AddItalicMessage(
+            //    "{} declined your private chat request.", pkt.PeerUsername);
             AddLobbyMessage("System",
                 std::format("{} declined your chat request.", pkt.PeerUsername),
                 0xFF888888, Safira::MessageRole::System);
@@ -741,7 +741,7 @@ void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
     auto session = std::make_unique<Safira::PrivateChatSession>(peerUsername);
     const uint16_t port = session->StartAsResponder(Safira::P2PKeyType::RSA_PSS);
     if (port == 0) {
-        m_Console.AddItalicMessage("Failed to start P2P listener for {}", peerUsername);
+        //m_Console.AddItalicMessage("Failed to start P2P listener for {}", peerUsername);
         return;
     }
     m_PrivateChats[peerUsername] = std::move(session);
@@ -751,8 +751,8 @@ void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
         peerUsername, true, port });
     m_Client->Send(writer.Written());
 
-    m_Console.AddItalicMessage(
-        "Accepted private chat with {}. Waiting for connection...", peerUsername);
+    //m_Console.AddItalicMessage(
+    //    "Accepted private chat with {}. Waiting for connection...", peerUsername);
 }
 
 void ClientLayer::StartPrivateChatAsInitiator(const std::string& peerUsername,
@@ -760,7 +760,7 @@ void ClientLayer::StartPrivateChatAsInitiator(const std::string& peerUsername,
     auto session = std::make_unique<Safira::PrivateChatSession>(peerUsername);
     session->StartAsInitiator(peerAddress);
     m_PrivateChats[peerUsername] = std::move(session);
-    m_Console.AddItalicMessage("Connecting to {} for private chat...", peerUsername);
+    // m_Console.AddItalicMessage("Connecting to {} for private chat...", peerUsername);
 }
 
 // =========================================================================
@@ -775,7 +775,7 @@ void ClientLayer::SendChatMessage(std::string_view message) {
     Safira::SerializePacket(writer, Safira::MessagePacket{ msg });
     m_Client->Send(writer.Written());
 
-    m_Console.AddTaggedMessageWithColor(m_Color | 0xFF000000, m_Username, msg);
+    // m_Console.AddTaggedMessageWithColor(m_Color | 0xFF000000, m_Username, msg);
     AddLobbyMessage(m_Username, msg, m_Color | 0xFF000000,
                     Safira::MessageRole::Own);
 }

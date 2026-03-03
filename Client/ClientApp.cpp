@@ -10,9 +10,9 @@ std::unique_ptr<Safira::ApplicationGUI> Safira::CreateApplication(int argc, char
     ApplicationSpecification spec;
     spec.name           = "Safira Chat Client";
     spec.IconPath       = "Safira-Icon.png";
-    spec.width          = 650;
+    spec.width          = 800;
     spec.height         = 700;
-    spec.CustomTitlebar = true;
+    spec.CustomTitlebar = false;
     spec.CenterWindow   = true;
 
     auto app = std::make_unique<ApplicationGUI>(spec);
