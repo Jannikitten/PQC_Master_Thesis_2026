@@ -14,9 +14,6 @@ namespace Safira {
 
 // ===========================================================================
 // Font helpers -- ZERO direct ImFont member access.
-// All sizing goes through ImGui::PushFont / GetFontSize / CalcTextSize.
-// All positioned text uses SetCursorScreenPos + TextUnformatted instead of
-// ImDrawList::AddText(ImFont*, float fontSize, ...).
 // ===========================================================================
 
 static ImFont* GetBodyFont() {
@@ -44,7 +41,6 @@ static ImVec2 MeasureText(ImFont* f, const char* text, float wrapWidth = 0.0f) {
     return sz;
 }
 
-// Draw text at an absolute screen position. Safe: never touches ImFont members.
 static void DrawTextAt(ImFont* f, ImVec2 pos, ImU32 col,
                        const char* text, float wrapWidth = 0.0f) {
     ImGui::SetCursorScreenPos(pos);
@@ -118,7 +114,7 @@ std::optional<int> ChatPanel::RenderFullLayout(
 }
 
 // ===========================================================================
-// RenderChatArea -- standalone for PrivateChatSession windows
+// RenderChatArea -- standalone chat area (used inside UI_UnifiedChatWindow)
 // ===========================================================================
 
 void ChatPanel::RenderChatArea(
@@ -205,11 +201,17 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
         ImDrawList* dl = ImGui::GetWindowDrawList();
         float tx = cursor.x + pad;
 
-        // Avatar
+        // Avatar -- use conversation texture if available
         float ax = tx + kAvatarRadius;
         float ay = cursor.y + itemSz.y * 0.5f;
         char letter = c.Title.empty() ? '?' : (char)toupper(c.Title[0]);
-        DrawAvatar(dl, ax, ay, kAvatarRadius, letter, Colors.Accent, Colors.AccentText);
+
+        ImU32 avatarBg = (i == 0)
+            ? IM_COL32(80, 120, 170, 255)   // Lobby blue
+            : Colors.Accent;
+
+        DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
+                   avatarBg, Colors.AccentText, c.AvatarTex);
 
         float textX = tx + kAvatarRadius * 2.0f + 10.0f;
 
@@ -245,6 +247,10 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
 
 // ===========================================================================
 // Messages
+//
+// BUG FIX: Removed lazy timestamp fill (msg.Time = NowTimestamp()) that was
+// called during rendering. Timestamps must be set at message creation time
+// in ClientLayer::AddLobbyMessage() and packet handlers.
 // ===========================================================================
 
 void ChatPanel::RenderMessages(std::vector<ChatEntry>& messages,
@@ -267,7 +273,9 @@ void ChatPanel::RenderMessages(std::vector<ChatEntry>& messages,
     } else {
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
         for (auto& msg : messages) {
-            if (msg.Time.empty()) msg.Time = NowTimestamp();
+            // NO lazy timestamp fill here -- timestamps set at creation time.
+            // If somehow empty, just leave it blank rather than overwriting
+            // every frame with the current time.
             DrawBubble(dl, msg, width, ownUsername);
         }
     }
@@ -284,6 +292,10 @@ void ChatPanel::RenderMessages(std::vector<ChatEntry>& messages,
 
 // ===========================================================================
 // Bubble
+//
+// In private mode (m_PrivateMode == true):
+//   - Author name is hidden
+//   - Bubble height is reduced (no author line)
 // ===========================================================================
 
 void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
@@ -311,11 +323,14 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
     float avatarSpace = kAvatarRadius * 2.0f + 10.0f;
     float textWrapW   = maxBubbleW - kBubblePadX * 2.0f;
 
+    // In private mode, skip the author name line
+    const bool showAuthor = !m_PrivateMode;
+
     float boldH   = FontHeight(bold);
-    float authorH = boldH + 2.0f;
+    float authorH = showAuthor ? (boldH + 2.0f) : 0.0f;
 
     ImVec2 textSz   = MeasureText(body, msg.Text.c_str(), textWrapW);
-    ImVec2 authorSz = MeasureText(bold, msg.Who.c_str());
+    ImVec2 authorSz = showAuthor ? MeasureText(bold, msg.Who.c_str()) : ImVec2{0, 0};
 
     float bubbleW = std::max(textSz.x, authorSz.x) + kBubblePadX * 2.0f;
     float bubbleH = textSz.y + kBubblePadY * 2.0f + authorH;
@@ -323,18 +338,21 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
     float marginX = 16.0f;
     ImVec2 cursor = ImGui::GetCursorScreenPos();
 
+    // In private mode, no avatar shown next to bubbles
+    float avatarOffset = (m_PrivateMode || isOwn) ? 0.0f : avatarSpace;
+
     float bubbleX = isOwn
         ? cursor.x + regionWidth - bubbleW - marginX
-        : cursor.x + marginX + avatarSpace;
+        : cursor.x + marginX + avatarOffset;
     float bubbleY = cursor.y;
 
-    // Avatar (peer only)
-    if (!isOwn) {
+    // Avatar (peer only, NOT in private mode)
+    if (!isOwn && !m_PrivateMode) {
         float ax = cursor.x + marginX + kAvatarRadius;
         float ay = bubbleY + kAvatarRadius + 2.0f;
         char letter = msg.Who.empty() ? '?' : (char)toupper(msg.Who[0]);
         DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
-                   Colors.Accent, Colors.AccentText);
+                   Colors.Accent, Colors.AccentText, msg.AvatarTex);
     }
 
     // Bubble background
@@ -362,11 +380,13 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
                     { bubbleX + bubbleW, bubbleY + bubbleH },
                     Colors.Divider, kBubbleRounding, 0, 1.0f);
 
-    // Author name
+    // Author name (skipped in private mode)
     float textY = bubbleY + kBubblePadY;
-    ImU32 nameCol = isOwn ? Colors.TextPrimary : Colors.Accent;
-    DrawTextAt(bold, { bubbleX + kBubblePadX, textY }, nameCol, msg.Who.c_str());
-    textY += authorH;
+    if (showAuthor) {
+        ImU32 nameCol = isOwn ? Colors.TextPrimary : Colors.Accent;
+        DrawTextAt(bold, { bubbleX + kBubblePadX, textY }, nameCol, msg.Who.c_str());
+        textY += authorH;
+    }
 
     // Body text
     DrawTextAt(body, { bubbleX + kBubblePadX, textY },
@@ -387,28 +407,43 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
 }
 
 // ===========================================================================
-// Avatar -- only dl->AddText we keep, wrapped in PushFont so ImGui resolves
-// the size internally without us touching any ImFont fields.
+// Avatar -- supports optional ImTextureID for image avatars
+//
+// When tex != 0: renders a circular image using AddImageRounded.
+// When tex == 0: falls back to colored circle + centered letter.
 // ===========================================================================
 
 void ChatPanel::DrawAvatar(ImDrawList* dl, float cx, float cy, float radius,
-                           char letter, ImU32 bgCol, ImU32 textCol) {
-    dl->AddCircleFilled({ cx, cy }, radius, bgCol, 24);
+                           char letter, ImU32 bgCol, ImU32 textCol,
+                           ImTextureID tex) {
+    if (tex) {
+        // Circular image avatar
+        dl->AddImageRounded(
+            tex,
+            { cx - radius, cy - radius },
+            { cx + radius, cy + radius },
+            { 0.0f, 0.0f }, { 1.0f, 1.0f },
+            IM_COL32(255, 255, 255, 255),
+            radius);
+    } else {
+        // Colored circle with letter fallback
+        dl->AddCircleFilled({ cx, cy }, radius, bgCol, 24);
 
-    char buf[2] = { letter, '\0' };
-    ImFont* bold = GetBoldFont();
-    ImVec2 sz = MeasureText(bold, buf);
+        char buf[2] = { letter, '\0' };
+        ImFont* bold = GetBoldFont();
+        ImVec2 sz = MeasureText(bold, buf);
 
-    // Use explicit font pointer + size — passing nullptr/0.0f can trigger
-    // assertion in ImFontAtlasPackAddRect when _Data->FontSize is uninit.
-    if (bold) ImGui::PushFont(bold);
-    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                { cx - sz.x * 0.5f, cy - sz.y * 0.5f }, textCol, buf);
-    if (bold) ImGui::PopFont();
+        if (bold) ImGui::PushFont(bold);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    { cx - sz.x * 0.5f, cy - sz.y * 0.5f }, textCol, buf);
+        if (bold) ImGui::PopFont();
+    }
 }
 
 // ===========================================================================
 // Status indicator
+//
+// In private mode: shows peer avatar (if set) + name + leave button
 // ===========================================================================
 
 void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
@@ -428,15 +463,39 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
     }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-
     ImFont* bold = GetBoldFont();
+
+    float startX = ImGui::GetCursorPosX() + 12.0f;
+    ImGui::SetCursorPosX(startX);
+
+    // In private mode, show peer avatar icon before name
+    if (m_PrivateMode && m_PeerAvatarTex) {
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        float iconR = 12.0f;
+        float iconCx = pos.x + iconR;
+        float iconCy = pos.y + FontHeight(bold) * 0.5f;
+        DrawAvatar(dl, iconCx, iconCy, iconR, peer.empty() ? '?' : (char)toupper(peer[0]),
+                   Colors.Accent, Colors.AccentText, m_PeerAvatarTex);
+        ImGui::SetCursorPosX(startX + iconR * 2.0f + 8.0f);
+    } else if (m_PrivateMode) {
+        // No peer avatar texture, draw letter circle
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        float iconR = 12.0f;
+        float iconCx = pos.x + iconR;
+        float iconCy = pos.y + FontHeight(bold) * 0.5f;
+        DrawAvatar(dl, iconCx, iconCy, iconR, peer.empty() ? '?' : (char)toupper(peer[0]),
+                   Colors.Accent, Colors.AccentText, ImTextureID{});
+        ImGui::SetCursorPosX(startX + iconR * 2.0f + 8.0f);
+    }
+
+    // Peer name
     if (bold) ImGui::PushFont(bold);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
     ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", peer.c_str());
     if (bold) ImGui::PopFont();
 
     ImGui::SameLine(0.0f, 12.0f);
 
+    // Status dot
     ImVec2 dotPos = ImGui::GetCursorScreenPos();
     float textH = ImGui::GetFontSize();
     dl->AddCircleFilled({ dotPos.x + 4.0f, dotPos.y + textH * 0.5f },
@@ -444,6 +503,25 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
 
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 14.0f);
     ImGui::TextColored(U32ToVec4(Colors.TextSecondary), "%s", label.c_str());
+
+    // "Leave" button in private mode
+    if (m_PrivateMode && m_OnLeave) {
+        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 50, 50, 200));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(180, 60, 60, 230));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(200, 70, 70, 255));
+        ImGui::PushStyleColor(ImGuiCol_Text,           IM_COL32(255, 255, 255, 255));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 10.0f, 3.0f });
+
+        if (ImGui::Button("Leave##pvt")) {
+            m_OnLeave();
+        }
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(4);
+    }
+
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
 }
 

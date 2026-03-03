@@ -81,6 +81,10 @@ public:
         m_EventQueue.push(std::forward<Func>(func));
     }
 
+    std::string m_TitlebarUserName;
+    bool        m_TitlebarUserOnline = false;
+    ImTextureID m_TitlebarAvatarTex = {};
+
 private:
     void Init();
     void Shutdown();

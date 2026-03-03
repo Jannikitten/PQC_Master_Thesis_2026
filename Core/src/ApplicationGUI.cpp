@@ -581,24 +581,113 @@ namespace Safira {
                 m_TitleBarHovered = true;
         }
 
-        // Draw Menubar
+        // ── User profile in top-left (avatar + username + status) ────────────
+        {
+            ImGui::SetNextItemAllowOverlap();
+            const float profileX = windowPadding.x + 12.0f;
+            const float profileY = windowPadding.y + titlebarVerticalOffset + 6.0f;
+            ImGui::SetCursorPos({ profileX, profileY });
+
+            ImDrawList* profDl = ImGui::GetWindowDrawList();
+            const ImVec2 profScreenPos = ImGui::GetCursorScreenPos();
+
+            constexpr float avatarR = 18.0f;
+            const float avatarCx = profScreenPos.x + avatarR;
+            const float avatarCy = profScreenPos.y + avatarR + 2.0f;
+
+            // Draw avatar (image or fallback letter)
+            if (m_TitlebarAvatarTex) {
+                profDl->AddImageRounded(
+                    m_TitlebarAvatarTex,
+                    { avatarCx - avatarR, avatarCy - avatarR },
+                    { avatarCx + avatarR, avatarCy + avatarR },
+                    { 0, 0 }, { 1, 1 },
+                    IM_COL32(255, 255, 255, 255), avatarR);
+            } else {
+                profDl->AddCircleFilled({ avatarCx, avatarCy }, avatarR,
+                    IM_COL32(218, 185, 107, 200), 24);
+
+                char uLetter = m_TitlebarUserName.empty()
+                    ? 'S'
+                    : static_cast<char>(toupper(m_TitlebarUserName[0]));
+                char uBuf[2] = { uLetter, '\0' };
+
+                ImFont* bFont = GetFont("Bold");
+                ImFont* useFont = bFont ? bFont : ImGui::GetFont();
+                if (bFont) ImGui::PushFont(bFont);
+                ImVec2 lSz = ImGui::CalcTextSize(uBuf);
+                profDl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    { avatarCx - lSz.x * 0.5f, avatarCy - lSz.y * 0.5f },
+                    IM_COL32(18, 18, 18, 255), uBuf);
+                if (bFont) ImGui::PopFont();
+            }
+
+            // Username text
+            const float textX = profScreenPos.x + avatarR * 2.0f + 10.0f;
+
+            if (!m_TitlebarUserName.empty()) {
+                ImFont* boldF = GetFont("Bold");
+                if (boldF) ImGui::PushFont(boldF);
+                ImGui::SetCursorScreenPos({ textX, profScreenPos.y + 4.0f });
+                ImGui::TextColored({ 0.82f, 0.82f, 0.82f, 1.0f }, "%s",
+                                   m_TitlebarUserName.c_str());
+                if (boldF) ImGui::PopFont();
+
+                // Online/Away status
+                const char* statusText = m_TitlebarUserOnline ? "Online" : "Away";
+                ImU32 statusCol = m_TitlebarUserOnline
+                    ? IM_COL32(76, 200, 76, 255)
+                    : IM_COL32(160, 160, 160, 180);
+
+                ImGui::SetCursorScreenPos({ textX, profScreenPos.y + 24.0f });
+
+                // Small status dot
+                ImVec2 dotPos = ImGui::GetCursorScreenPos();
+                profDl->AddCircleFilled({ dotPos.x + 4.0f, dotPos.y + 6.0f },
+                    3.0f, statusCol, 12);
+
+                ImGui::SetCursorScreenPos({ dotPos.x + 12.0f, dotPos.y - 1.0f });
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(
+                    m_TitlebarUserOnline
+                        ? IM_COL32(120, 180, 120, 200)
+                        : IM_COL32(130, 130, 130, 160)),
+                    "%s", statusText);
+            } else {
+                // No user logged in -- show app name
+                ImFont* boldF = GetFont("Bold");
+                if (boldF) ImGui::PushFont(boldF);
+                ImGui::SetCursorScreenPos({ textX, profScreenPos.y + 10.0f });
+                ImGui::TextColored({ 0.85f, 0.73f, 0.42f, 1.0f }, "Safira");
+                if (boldF) ImGui::PopFont();
+            }
+
+            // Keep drag zone awareness
+            if (ImGui::IsMouseHoveringRect(
+                    profScreenPos,
+                    { profScreenPos.x + avatarR * 2.0f + 160.0f,
+                      profScreenPos.y + titlebarHeight - 12.0f }))
+                m_TitleBarHovered = false;
+        }
+
+        // Draw Menubar (shifted right to avoid overlap with profile)
         if (m_MenubarCallback) {
             ImGui::SetNextItemAllowOverlap();
-            const float logoHorizontalOffset = 16.0f * 2.0f + 48.0f + windowPadding.x;
+            const float logoHorizontalOffset = 16.0f * 2.0f + 200.0f + windowPadding.x;
             ImGui::SetCursorPos(ImVec2(logoHorizontalOffset, 6.0f + titlebarVerticalOffset));
             UI_DrawMenubar();
             if (ImGui::IsItemHovered())
                 m_TitleBarHovered = false;
         }
 
-        // Centered Window title
+        // Centered Window title (subtle, smaller)
         {
             ImVec2 currentCursorPos = ImGui::GetCursorPos();
-            ImVec2 textSize = ImGui::CalcTextSize(m_Specification.name.c_str());
+            const char* titleText = "Safira";
+            ImVec2 textSize = ImGui::CalcTextSize(titleText);
             ImGui::SetCursorPos(ImVec2(
                 ImGui::GetWindowWidth() * 0.5f - textSize.x * 0.5f,
                 2.0f + windowPadding.y + 6.0f));
-            ImGui::Text("%s", m_Specification.name.c_str());
+            ImGui::TextColored({ 0.55f, 0.55f, 0.55f, 0.5f }, "%s", titleText);
             ImGui::SetCursorPos(currentCursorPos);
         }
 
