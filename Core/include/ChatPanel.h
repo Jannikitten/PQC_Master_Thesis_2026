@@ -12,6 +12,7 @@
 // =============================================================================
 
 #include <imgui.h>
+#include "Theme.h"
 
 #include <cstdint>
 #include <functional>
@@ -49,37 +50,9 @@ struct ConversationInfo {
 };
 
 // -----------------------------------------------------------------------------
-// Chat-specific palette -- extends the existing Safira theme
+// Chat-specific palette is now in Theme.h (Safira::ThemeData)
+// Access via: const auto& t = Safira::Theme::Get();
 // -----------------------------------------------------------------------------
-
-struct ChatColors {
-    ImU32 BgMain          = IM_COL32( 36,  36,  36, 255);
-    ImU32 BgSidebar       = IM_COL32( 28,  28,  28, 255);
-    ImU32 BgSidebarHover  = IM_COL32( 46,  46,  46, 255);
-    ImU32 BgSidebarActive = IM_COL32( 54,  54,  54, 255);
-
-    ImU32 BgOwnBubble     = IM_COL32( 50,  64,  82, 255);
-    ImU32 BgPeerBubble    = IM_COL32( 50,  50,  50, 255);
-    ImU32 BgSystemBubble  = IM_COL32( 36,  36,  36, 255);
-
-    ImU32 Accent          = IM_COL32(218, 185, 107, 255);
-    ImU32 AccentHover     = IM_COL32(240, 206, 125, 255);
-    ImU32 AccentText      = IM_COL32( 18,  18,  18, 255);
-
-    ImU32 TextPrimary     = IM_COL32(210, 210, 210, 255);
-    ImU32 TextSecondary   = IM_COL32(140, 140, 140, 255);
-    ImU32 TextMuted       = IM_COL32(100, 100, 100, 255);
-    ImU32 TextSystem      = IM_COL32(115, 115, 115, 255);
-
-    ImU32 Divider         = IM_COL32( 56,  56,  56, 255);
-    ImU32 InputBg         = IM_COL32( 48,  48,  48, 255);
-    ImU32 InputBorder     = IM_COL32( 68,  68,  68, 255);
-    ImU32 InputShadow     = IM_COL32(  0,   0,   0,  40);
-    ImU32 UnreadDot       = IM_COL32(218, 185, 107, 255);
-    ImU32 StatusOnline    = IM_COL32( 76, 200,  76, 255);
-    ImU32 StatusPending   = IM_COL32(218, 185, 107, 255);
-    ImU32 StatusOffline   = IM_COL32(180,  65,  65, 255);
-};
 
 // -----------------------------------------------------------------------------
 // ChatPanel
@@ -126,7 +99,6 @@ public:
     static std::string NowTimestamp();
 
     // -- Public config -------------------------------------------------------
-    ChatColors  Colors;
     std::string StatusProtocol = "DTLS 1.3 | ML-KEM-512";
 
 private:

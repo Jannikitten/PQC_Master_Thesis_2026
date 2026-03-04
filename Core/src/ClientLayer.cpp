@@ -1,8 +1,12 @@
 #include "ClientLayer.h"
 #include "ServerPacket.h"
 #include "ApplicationGUI.h"
+#include "Theme.h"
 #include "UI.h"
 #include "misc/cpp/imgui_stdlib.h"
+
+using Safira::Theme;
+using Safira::U32ToVec4;
 
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
@@ -97,7 +101,7 @@ void SidebarDrawTextTruncated(ImFont* f, ImVec2 pos, ImU32 col,
 static void DrawIconShape(ImDrawList* draw, ImVec2 center, float radius, uint8_t idx) {
     const uint32_t col = Safira::Icons::kColors[idx % Safira::Icons::kCount];
     draw->AddCircleFilled(center, radius, col);
-    draw->AddCircle(center, radius, IM_COL32(80, 80, 80, 200), 0, 1.5f);
+    draw->AddCircle(center, radius, Theme::Get().IconOutline, 0, 1.5f);
 }
 
 // =========================================================================
@@ -296,7 +300,7 @@ void ClientLayer::LeavePrivateChat(const std::string& peerUsername) {
 
     AddLobbyMessage("System",
         std::format("Left private chat with {}.", peerUsername),
-        0xFF888888, Safira::MessageRole::System);
+        Theme::Get().TextSystem, Safira::MessageRole::System);
 }
 
 // =========================================================================
@@ -308,15 +312,16 @@ void ClientLayer::UI_ConnectionModal() {
         m_Client->GetConnectionStatus() != Safira::ConnectionStatus::Connected)
         ImGui::OpenPopup("Connect to Safira");
 
-    // Dark theme styling for the modal
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,      IM_COL32(28, 28, 28, 245));
-    ImGui::PushStyleColor(ImGuiCol_Border,        IM_COL32(60, 60, 60, 200));
-    ImGui::PushStyleColor(ImGuiCol_TitleBg,       IM_COL32(36, 36, 36, 255));
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(36, 36, 36, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(210, 210, 210, 255));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,       IM_COL32(48, 48, 48, 255));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(58, 58, 58, 255));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(68, 68, 68, 255));
+    // Themed styling for the modal
+    const auto& t = Theme::Get();
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,      t.BgPopup);
+    ImGui::PushStyleColor(ImGuiCol_Border,        t.ModalBorder);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,       t.BgPanel);
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, t.BgPanel);
+    ImGui::PushStyleColor(ImGuiCol_Text,          t.TextPrimary);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,       t.BgFrame);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, t.BgFrameHovered);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, t.BgFrameActive);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
 
@@ -332,21 +337,21 @@ void ClientLayer::UI_ConnectionModal() {
     // ── Title header ──────────────────────────────────────────────
     ImFont* bold = SidebarBoldFont();
     if (bold) ImGui::PushFont(bold);
-    ImGui::TextColored({ 0.85f, 0.73f, 0.42f, 1.0f }, "Safira");
+    ImGui::TextColored(U32ToVec4(Theme::Get().Accent), "Safira");
     if (bold) ImGui::PopFont();
-    ImGui::TextColored({ 0.55f, 0.55f, 0.55f, 1.0f }, "Post-Quantum Secure Messaging");
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Post-Quantum Secure Messaging");
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
     // ── Username ──────────────────────────────────────────────────
-    ImGui::TextColored({ 0.65f, 0.65f, 0.65f, 1.0f }, "Username");
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Username");
     ImGui::SetNextItemWidth(280.0f);
     ImGui::InputText("##username", &m_Username);
     ImGui::Spacing();
 
     // ── Avatar image (replaces color picker) ─────────────────────
-    ImGui::TextColored({ 0.65f, 0.65f, 0.65f, 1.0f }, "Profile Image (optional)");
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Profile Image (optional)");
     ImGui::SetNextItemWidth(220.0f);
     ImGui::InputText("##avatarpath", &m_AvatarImagePath);
     ImGui::SameLine();
@@ -364,14 +369,14 @@ void ClientLayer::UI_ConnectionModal() {
         ImGui::GetWindowDrawList()->AddImageRounded(
             m_AvatarTexture,
             { pos.x, pos.y }, { pos.x + r * 2, pos.y + r * 2 },
-            { 0, 0 }, { 1, 1 }, IM_COL32(255,255,255,255), r);
+            { 0, 0 }, { 1, 1 }, Theme::Get().AvatarImageTint, r);
         ImGui::Dummy({ r * 2, r * 2 });
     }
 
     ImGui::Spacing();
 
     // ── Pick an icon (still available as fallback) ───────────────
-    ImGui::TextColored({ 0.65f, 0.65f, 0.65f, 1.0f }, "Fallback Icon");
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Fallback Icon");
     constexpr float kIconSize = 28.0f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -385,7 +390,7 @@ void ClientLayer::UI_ConnectionModal() {
         if (m_IconIndex == static_cast<uint8_t>(i))
             dl->AddRect({ pos.x - 2, pos.y - 2 },
                         { pos.x + kIconSize + 2, pos.y + kIconSize + 2 },
-                        IM_COL32(218, 185, 107, 255), 3.0f, 0, 2.0f);
+                        Theme::Get().Accent, 3.0f, 0, 2.0f);
 
         DrawIconShape(dl, center, radius, static_cast<uint8_t>(i));
         ImGui::Dummy({ kIconSize, kIconSize });
@@ -399,16 +404,16 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::Spacing();
 
     // ── Server address ───────────────────────────────────────────
-    ImGui::TextColored({ 0.65f, 0.65f, 0.65f, 1.0f }, "Server Address");
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Server Address");
     ImGui::SetNextItemWidth(200.0f);
     ImGui::InputText("##address", &m_ServerIP);
     ImGui::SameLine();
 
-    // Connect button -- gold accent
-    ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(218, 185, 107, 255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(240, 206, 125, 255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(200, 170, 90, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(18, 18, 18, 255));
+    // Connect button -- accent
+    ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().AccentActive);
+    ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
 
     if (ImGui::Button("Connect", { 80, 0 })) {
@@ -417,7 +422,7 @@ void ClientLayer::UI_ConnectionModal() {
             LoadAvatarImage(m_AvatarImagePath);
         }
 
-        m_Color = IM_COL32(210, 210, 210, 255);  // default neutral color
+        m_Color = Theme::Get().TextPrimary;  // default neutral color
 
         std::string addr = m_ServerIP;
         if (addr.rfind(':') == std::string::npos)
@@ -431,9 +436,9 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::Spacing();
 
     // Quit button -- subtle
-    ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(60, 60, 60, 200));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 50, 50, 220));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(100, 50, 50, 255));
+    ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().DeclineBtnActive);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
 
     if (Safira::UI::ButtonCentered("Quit"))
@@ -480,7 +485,7 @@ void ClientLayer::UI_UserListSection(float) {
     ImFont* bold = SidebarBoldFont();
 
     if (bold) ImGui::PushFont(bold);
-    ImGui::TextColored({ 0.82f, 0.82f, 0.82f, 1.0f }, "Online (%d)",
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextPrimary), "Online (%d)",
                        static_cast<int>(m_ConnectedClients.size()));
     if (bold) ImGui::PopFont();
 
@@ -510,10 +515,10 @@ void ClientLayer::UI_UserListSection(float) {
                 ImGui::OpenPopup(popupId.c_str());
             }
 
-            // Dark-themed context menu
-            ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(38, 38, 38, 245));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(60, 60, 60, 255));
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(210, 210, 210, 255));
+            // Themed context menu
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Get().BgPopupAlt);
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Theme::Get().BgFrameHovered);
+            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Get().TextPrimary);
             ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6.0f);
 
             if (ImGui::BeginPopup(popupId.c_str())) {
@@ -531,7 +536,7 @@ void ClientLayer::UI_UserListSection(float) {
                         m_PendingOutgoingInvites.insert(username);
                         AddLobbyMessage("System",
                             std::format("Invited {} to a private chat.", username),
-                            0xFF888888, Safira::MessageRole::System);
+                            Theme::Get().TextSystem, Safira::MessageRole::System);
                     }
                 }
 
@@ -552,7 +557,7 @@ void ClientLayer::UI_UserListSection(float) {
         }
 
         ImGui::SameLine(0, 6);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImColor(info.Color).Value);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImColor(Theme::Get().TextPrimary).Value);
         ImGui::TextUnformatted(username.c_str());
         ImGui::PopStyleColor();
 
@@ -576,11 +581,11 @@ void ClientLayer::UI_ReportModal() {
         m_ReportModalOpen = false;
     }
 
-    // Dark theme styling
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,      IM_COL32(32, 32, 32, 245));
-    ImGui::PushStyleColor(ImGuiCol_Border,        IM_COL32(60, 60, 60, 200));
-    ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(210, 210, 210, 255));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,       IM_COL32(48, 48, 48, 255));
+    // Themed styling
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,      Theme::Get().BgPopupAlt);
+    ImGui::PushStyleColor(ImGuiCol_Border,        Theme::Get().ModalBorder);
+    ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().TextPrimary);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,       Theme::Get().BgFrame);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
 
     bool open = true;
@@ -590,7 +595,7 @@ void ClientLayer::UI_ReportModal() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::TextColored({ 0.65f, 0.65f, 0.65f, 1.0f }, "Reason:");
+        ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Reason:");
         ImGui::SetNextItemWidth(300.0f);
         ImGui::InputTextMultiline("##ReportReason", m_ReportReasonBuf,
                                    sizeof(m_ReportReasonBuf),
@@ -598,11 +603,11 @@ void ClientLayer::UI_ReportModal() {
 
         ImGui::Spacing();
 
-        // Submit button (gold)
-        ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(218, 185, 107, 255));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(240, 206, 125, 255));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(200, 170, 90, 255));
-        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(18, 18, 18, 255));
+        // Submit button (accent)
+        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().AccentActive);
+        ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
         if (ImGui::Button("Submit Report", { 130, 0 })) {
@@ -617,7 +622,7 @@ void ClientLayer::UI_ReportModal() {
 
                 AddLobbyMessage("System",
                     std::format("Reported {} to server.", m_ReportTarget),
-                    0xFF888888, Safira::MessageRole::System);
+                    Theme::Get().TextSystem, Safira::MessageRole::System);
             }
             ImGui::CloseCurrentPopup();
         }
@@ -628,8 +633,8 @@ void ClientLayer::UI_ReportModal() {
         ImGui::SameLine();
 
         // Cancel button
-        ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(60, 60, 60, 200));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 60, 60, 220));
+        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
         if (ImGui::Button("Cancel", { 80, 0 })) {
@@ -658,9 +663,9 @@ void ClientLayer::UI_IncomingInvites() {
 
     ImGui::OpenPopup(popupId.c_str());
 
-    // Dark theme for invite popup
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(32, 32, 32, 245));
-    ImGui::PushStyleColor(ImGuiCol_Text,    IM_COL32(210, 210, 210, 255));
+    // Themed invite popup
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Get().BgPopupAlt);
+    ImGui::PushStyleColor(ImGuiCol_Text,    Theme::Get().TextPrimary);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
 
     bool open = true;
@@ -676,10 +681,10 @@ void ClientLayer::UI_IncomingInvites() {
         const float availW = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - totalW) * 0.5f);
 
-        // Accept (gold)
-        ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(218, 185, 107, 255));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(240, 206, 125, 255));
-        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(18, 18, 18, 255));
+        // Accept (accent)
+        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
+        ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
         if (ImGui::Button("Accept", { btnW, 0 })) {
@@ -694,8 +699,8 @@ void ClientLayer::UI_IncomingInvites() {
         ImGui::SameLine(0, btnGap);
 
         // Decline
-        ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(60, 60, 60, 200));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 50, 50, 220));
+        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
         if (ImGui::Button("Decline", { btnW, 0 })) {
@@ -730,7 +735,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
     const ImVec2 outerAvail = ImGui::GetContentRegionAvail();
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Get().PanelBgVec4());
     ImGui::BeginChild("##ChatPanel", outerAvail, false,
                        ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();
@@ -749,7 +754,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
     // -- Left sidebar --------------------------------------------------------
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                          ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
+                          Theme::Get().PanelBgVec4());
     ImGui::BeginChild("##Sidebar", { sideW, avail.y }, false,
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
@@ -774,7 +779,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
             ImVec2 p = ImGui::GetCursorScreenPos();
             dl->AddLine({ p.x + pad, p.y },
                         { p.x + sideW - pad, p.y },
-                        IM_COL32(48, 48, 48, 255), 1.0f);
+                        Theme::Get().Divider, 1.0f);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
         }
 
@@ -795,8 +800,8 @@ void ClientLayer::UI_UnifiedChatWindow() {
                 cursor, { cursor.x + itemSz.x, cursor.y + itemSz.y });
 
             ImU32 bg = 0;
-            if (i == m_ActiveConvoIdx) bg = IM_COL32(28, 28, 28, 255);
-            else if (hovered)          bg = IM_COL32(32, 32, 32, 255);
+            if (i == m_ActiveConvoIdx) bg = Theme::Get().BgItemSelected;
+            else if (hovered)          bg = Theme::Get().BgItemHovered;
 
             if (bg)
                 ImGui::GetWindowDrawList()->AddRectFilled(
@@ -817,23 +822,23 @@ void ClientLayer::UI_UnifiedChatWindow() {
                 : static_cast<char>(toupper(c.Title[0]));
             char buf[2] = { letter, '\0' };
 
-            ImU32 avatarCol = IM_COL32(218, 185, 107, 255);
+            ImU32 avatarCol = Theme::Get().Accent;
             if (i == 0)
-                avatarCol = IM_COL32(80, 120, 170, 255);
+                avatarCol = Theme::Get().LobbyAvatar;
 
             // Use conversation avatar texture if available
             if (c.AvatarTex) {
                 dl->AddImageRounded(c.AvatarTex,
                     { ax - kR, ay - kR }, { ax + kR, ay + kR },
                     { 0, 0 }, { 1, 1 },
-                    IM_COL32(255, 255, 255, 255), kR);
+                    Theme::Get().AvatarImageTint, kR);
             } else {
                 dl->AddCircleFilled({ ax, ay }, kR, avatarCol, 24);
                 ImVec2 lsz = SidebarMeasureText(bold, buf);
                 if (bold) ImGui::PushFont(bold);
                 dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                             { ax - lsz.x * 0.5f, ay - lsz.y * 0.5f },
-                            IM_COL32(255, 255, 255, 255), buf);
+                            Theme::Get().AvatarLetterCol, buf);
                 if (bold) ImGui::PopFont();
             }
 
@@ -847,13 +852,13 @@ void ClientLayer::UI_UnifiedChatWindow() {
                 titleMaxW -= (tSz.x + 8.0f);  // gap before time label
             }
             SidebarDrawTextTruncated(bold, { textX, cursor.y + 8.0f },
-                              IM_COL32(210, 210, 210, 255),
+                              Theme::Get().ConvoTitleCol,
                               c.Title.c_str(), titleMaxW);
 
             // Preview — truncate to available width
             const float previewMaxW = rightEdge - textX;
             SidebarDrawTextTruncated(body, { textX, cursor.y + 28.0f },
-                              IM_COL32(130, 130, 130, 255),
+                              Theme::Get().ConvoPreviewCol,
                               c.Preview.c_str(), previewMaxW);
 
             if (!c.TimeLabel.empty()) {
@@ -861,7 +866,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
                 dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                     { cursor.x + sideW - pad - tSz.x - 4.0f,
                       cursor.y + 10.0f },
-                    IM_COL32(110, 110, 110, 255),
+                    Theme::Get().ConvoTimeCol,
                     c.TimeLabel.c_str());
             }
 
@@ -879,7 +884,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                          ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
+                          Theme::Get().PanelBgVec4());
     ImGui::BeginChild("##ChatArea", { chatW, avail.y }, false,
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
@@ -978,7 +983,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
     if (!anyModalOpen) {
         ImDrawList* dl = ImGui::GetForegroundDrawList();
         ImVec2 origin = ImGui::GetWindowPos();
-        const ImU32 lineCol = IM_COL32(48, 48, 48, 255);
+        const ImU32 lineCol = Theme::Get().Separator;
 
         // Horizontal line at top (separates titlebar from panels)
         dl->AddLine(origin, { origin.x + avail.x, origin.y },
@@ -1012,7 +1017,7 @@ void ClientLayer::OnConnected() {
 void ClientLayer::OnDisconnected() {
     m_Console.AddItalicMessageWithColor(0xFF8A8A8A, "Lost connection to server!");
     AddLobbyMessage("System", "Lost connection to server!",
-                    0xFF888888, Safira::MessageRole::System);
+                    Theme::Get().TextSystem, Safira::MessageRole::System);
     m_IncomingInvites.clear();
     m_PendingOutgoingInvites.clear();
 
@@ -1072,7 +1077,7 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
             m_ConnectedClients[pkt.Client.Username] = pkt.Client;
             AddLobbyMessage("System",
                 std::format("Welcome {}!", pkt.Client.Username),
-                0xFF888888, Safira::MessageRole::System);
+                Theme::Get().TextSystem, Safira::MessageRole::System);
         },
         [&](const Safira::ClientDisconnectPacket& pkt) {
             m_ConnectedClients.erase(pkt.Client.Username);
@@ -1082,7 +1087,7 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                                                 "Goodbye {}!", pkt.Client.Username);
             AddLobbyMessage("System",
                 std::format("Goodbye {}!", pkt.Client.Username),
-                0xFF888888, Safira::MessageRole::System);
+                Theme::Get().TextSystem, Safira::MessageRole::System);
         },
         [&](const Safira::MessageHistoryPacket& pkt) {
             for (const auto& m : pkt.Messages) {
@@ -1106,13 +1111,13 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                     m_ServerIP, m_Username);
                 AddLobbyMessage("System",
                     std::format("Connected to {} as {}", m_ServerIP, m_Username),
-                    0xFF888888, Safira::MessageRole::System);
+                    Theme::Get().TextSystem, Safira::MessageRole::System);
             }
         },
         [&](const Safira::ServerShutdownPacket&) {
             m_Console.AddItalicMessage("Server is shutting down... goodbye!");
             AddLobbyMessage("System", "Server is shutting down...",
-                            0xFF888888, Safira::MessageRole::System);
+                            Theme::Get().TextSystem, Safira::MessageRole::System);
             m_Client->RequestDisconnect();
         },
         [&](const Safira::ClientKickPacket& pkt) {
@@ -1146,7 +1151,7 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                 "{} declined your private chat request.", pkt.PeerUsername);
             AddLobbyMessage("System",
                 std::format("{} declined your chat request.", pkt.PeerUsername),
-                0xFF888888, Safira::MessageRole::System);
+                Theme::Get().TextSystem, Safira::MessageRole::System);
         },
     }, *packet);
 }
@@ -1210,7 +1215,7 @@ void ClientLayer::SendChatMessage(std::string_view message) {
         const char* status = app.m_UserManualAway ? "Away" : "Online";
         AddLobbyMessage("System",
             std::format("Status changed to {}.", status),
-            0xFF888888, Safira::MessageRole::System);
+            Theme::Get().TextSystem, Safira::MessageRole::System);
 
         if (!app.m_UserManualAway)
             app.m_LastActivityTime = std::chrono::steady_clock::now();
@@ -1258,7 +1263,7 @@ bool ClientLayer::LoadConnectionDetails(const std::filesystem::path& filepath) {
     m_Username  = root["Username"].as<std::string>("");
     m_ServerIP  = root["ServerIP"].as<std::string>("127.0.0.1");
     m_IconIndex = static_cast<uint8_t>(root["IconIndex"].as<int>(0));
-    m_Color     = IM_COL32(210, 210, 210, 255);  // default neutral
+    m_Color     = Theme::Get().TextPrimary;  // default neutral
 
     // Load avatar image path and attempt to load image
     m_AvatarImagePath = root["AvatarImagePath"].as<std::string>("");

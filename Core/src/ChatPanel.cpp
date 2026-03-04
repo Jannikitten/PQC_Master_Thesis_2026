@@ -57,9 +57,6 @@ static void DrawTextAt(ImFont* f, ImVec2 pos, ImU32 col,
     if (f) ImGui::PopFont();
 }
 
-static ImVec4 U32ToVec4(ImU32 col) {
-    return ImGui::ColorConvertU32ToFloat4(col);
-}
 
 // ---------------------------------------------------------------------------
 ChatPanel::ChatPanel() = default;
@@ -79,7 +76,7 @@ std::optional<int> ChatPanel::RenderFullLayout(
     int newIdx = RenderSidebar(conversations, activeIdx, sideW, avail.y);
     ImGui::SameLine(0.0f, 0.0f);
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, U32ToVec4(Colors.BgMain));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, U32ToVec4(Theme::Get().BgPanel));
     ImGui::BeginChild("##ChatArea", { chatW, avail.y }, false,
                       ImGuiWindowFlags_NoScrollbar);
 
@@ -97,7 +94,7 @@ std::optional<int> ChatPanel::RenderFullLayout(
         ImFont* body = GetBodyFont();
         ImVec2 sSz = MeasureText(body, sub);
         ImGui::SetCursorPos({ (chatW - sSz.x) * 0.5f, avail.y * 0.45f });
-        ImGui::TextColored(U32ToVec4(Colors.TextMuted), "%s", sub);
+        ImGui::TextColored(U32ToVec4(Theme::Get().TextMuted), "%s", sub);
     }
 
     ImGui::EndChild();
@@ -120,7 +117,7 @@ void ChatPanel::RenderChatArea(
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x;
-    dl->AddLine(p, { p.x + w, p.y }, Colors.Divider, 1.0f);
+    dl->AddLine(p, { p.x + w, p.y }, Theme::Get().Divider, 1.0f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
 
     float remaining = ImGui::GetContentRegionAvail().y - kInputBarHeight - 8.0f;
@@ -136,7 +133,7 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
                              int activeIdx, float width, float height) {
     int result = activeIdx;
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, U32ToVec4(Colors.BgSidebar));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, U32ToVec4(Theme::Get().BgPanel));
     ImGui::BeginChild("##ChatSidebar", { width, height }, false,
                       ImGuiWindowFlags_NoScrollbar);
 
@@ -145,13 +142,13 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
 
     ImFont* bold = GetBoldFont();
     if (bold) ImGui::PushFont(bold);
-    ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "Conversations");
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextPrimary), "Conversations");
     if (bold) ImGui::PopFont();
 
     ImGui::SameLine(width - pad - 26.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button,       U32ToVec4(Colors.Accent));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, U32ToVec4(Colors.AccentHover));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  U32ToVec4(Colors.AccentHover));
+    ImGui::PushStyleColor(ImGuiCol_Button,       U32ToVec4(Theme::Get().Accent));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, U32ToVec4(Theme::Get().AccentHover));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  U32ToVec4(Theme::Get().AccentHover));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 13.0f);
     if (ImGui::Button("+", { 26.0f, 26.0f })) {
         if (m_OnNewConversation) m_OnNewConversation();
@@ -164,7 +161,7 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p = ImGui::GetCursorScreenPos();
         dl->AddLine({ p.x + pad, p.y }, { p.x + width - pad, p.y },
-                    Colors.Divider, 1.0f);
+                    Theme::Get().Divider, 1.0f);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
     }
 
@@ -183,8 +180,8 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
             cursor, { cursor.x + itemSz.x, cursor.y + itemSz.y });
 
         ImU32 bg = 0;
-        if (selected)     bg = Colors.BgSidebarActive;
-        else if (hovered) bg = Colors.BgSidebarHover;
+        if (selected)     bg = Theme::Get().BgItemSelected;
+        else if (hovered) bg = Theme::Get().BgItemHovered;
         if (bg)
             ImGui::GetWindowDrawList()->AddRectFilled(
                 cursor, { cursor.x + itemSz.x, cursor.y + itemSz.y }, bg, 6.0f);
@@ -201,33 +198,33 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
         char letter = c.Title.empty() ? '?' : (char)toupper(c.Title[0]);
 
         ImU32 avatarBg = (i == 0)
-            ? IM_COL32(80, 120, 170, 255)   // Lobby blue
-            : Colors.Accent;
+            ? Theme::Get().LobbyAvatar
+            : Theme::Get().Accent;
 
         DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
-                   avatarBg, Colors.AccentText, c.AvatarTex);
+                   avatarBg, Theme::Get().AccentText, c.AvatarTex);
 
         float textX = tx + kAvatarRadius * 2.0f + 10.0f;
 
         DrawTextAt(bold, { textX, cursor.y + 10.0f },
-                   Colors.TextPrimary, c.Title.c_str());
+                   Theme::Get().TextPrimary, c.Title.c_str());
 
         std::string preview = c.Preview.substr(0, 32);
         if (c.Preview.size() > 32) preview += "...";
         DrawTextAt(body, { textX, cursor.y + 30.0f },
-                   Colors.TextSecondary, preview.c_str());
+                   Theme::Get().TextSecondary, preview.c_str());
 
         if (!c.TimeLabel.empty()) {
             ImVec2 tSz = MeasureText(body, c.TimeLabel.c_str());
             DrawTextAt(body,
                 { cursor.x + width - pad - tSz.x - 4.0f, cursor.y + 12.0f },
-                Colors.TextMuted, c.TimeLabel.c_str());
+                Theme::Get().TextMuted, c.TimeLabel.c_str());
         }
 
         if (c.HasUnread)
             dl->AddCircleFilled(
                 { cursor.x + width - pad - 4.0f, cursor.y + itemSz.y * 0.5f },
-                4.0f, Colors.UnreadDot, 12);
+                4.0f, Theme::Get().UnreadDot, 12);
 
         ImGui::SetCursorScreenPos({ cursor.x, cursor.y + itemSz.y });
         ImGui::PopID();
@@ -251,10 +248,10 @@ void ChatPanel::RenderMessages(std::vector<ChatEntry>& messages,
                                float width, float height,
                                const std::string& ownUsername) {
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 5.0f);
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg,          IM_COL32(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab,         IM_COL32(255,255,255,30));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered,  IM_COL32(255,255,255,55));
-    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive,   IM_COL32(255,255,255,80));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg,          Theme::Get().ScrollBg);
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab,         Theme::Get().ScrollGrab);
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered,  Theme::Get().ScrollGrabHover);
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive,   Theme::Get().ScrollGrabActive);
 
     ImGui::BeginChild("##MsgScroll", { width, height }, false);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -263,7 +260,7 @@ void ChatPanel::RenderMessages(std::vector<ChatEntry>& messages,
         const char* hint = "No messages yet.";
         ImVec2 sz = ImGui::CalcTextSize(hint);
         ImGui::SetCursorPos({ (width - sz.x) * 0.5f, (height - sz.y) * 0.5f });
-        ImGui::TextColored(U32ToVec4(Colors.TextMuted), "%s", hint);
+        ImGui::TextColored(U32ToVec4(Theme::Get().TextMuted), "%s", hint);
     } else {
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
         for (auto& msg : messages) {
@@ -301,7 +298,7 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
         ImVec2 sz = ImGui::CalcTextSize(msg.Text.c_str(), nullptr, false,
                                         regionWidth * 0.8f);
         ImGui::SetCursorPosX((regionWidth - sz.x) * 0.5f);
-        ImGui::PushStyleColor(ImGuiCol_Text, U32ToVec4(Colors.TextSystem));
+        ImGui::PushStyleColor(ImGuiCol_Text, U32ToVec4(Theme::Get().TextSystem));
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + regionWidth * 0.8f);
         ImGui::TextUnformatted(msg.Text.c_str());
         ImGui::PopTextWrapPos();
@@ -346,11 +343,11 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
         float ay = bubbleY + kAvatarRadius + 2.0f;
         char letter = msg.Who.empty() ? '?' : (char)toupper(msg.Who[0]);
         DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
-                   Colors.Accent, Colors.AccentText, msg.AvatarTex);
+                   Theme::Get().Accent, Theme::Get().AccentText, msg.AvatarTex);
     }
 
     // Bubble background
-    ImU32 bubbleCol = isOwn ? Colors.BgOwnBubble : Colors.BgPeerBubble;
+    ImU32 bubbleCol = isOwn ? Theme::Get().BgOwnBubble : Theme::Get().BgPeerBubble;
     dl->AddRectFilled({ bubbleX, bubbleY },
                       { bubbleX + bubbleW, bubbleY + bubbleH },
                       bubbleCol, kBubbleRounding, ImDrawFlags_RoundCornersAll);
@@ -372,19 +369,19 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
     if (!isOwn)
         dl->AddRect({ bubbleX, bubbleY },
                     { bubbleX + bubbleW, bubbleY + bubbleH },
-                    Colors.Divider, kBubbleRounding, 0, 1.0f);
+                    Theme::Get().Divider, kBubbleRounding, 0, 1.0f);
 
     // Author name (skipped in private mode)
     float textY = bubbleY + kBubblePadY;
     if (showAuthor) {
-        ImU32 nameCol = isOwn ? Colors.TextPrimary : Colors.Accent;
+        ImU32 nameCol = isOwn ? Theme::Get().TextPrimary : Theme::Get().Accent;
         DrawTextAt(bold, { bubbleX + kBubblePadX, textY }, nameCol, msg.Who.c_str());
         textY += authorH;
     }
 
     // Body text
     DrawTextAt(body, { bubbleX + kBubblePadX, textY },
-               Colors.TextPrimary, msg.Text.c_str(), textWrapW);
+               Theme::Get().TextPrimary, msg.Text.c_str(), textWrapW);
 
     // Timestamp
     if (!msg.Time.empty()) {
@@ -392,7 +389,7 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
         DrawTextAt(nullptr,
             { bubbleX + bubbleW - tsSz.x - kBubblePadX,
               bubbleY + bubbleH + 2.0f },
-            Colors.TextMuted, msg.Time.c_str());
+            Theme::Get().TextMuted, msg.Time.c_str());
     }
 
     // Advance cursor
@@ -417,7 +414,7 @@ void ChatPanel::DrawAvatar(ImDrawList* dl, float cx, float cy, float radius,
             { cx - radius, cy - radius },
             { cx + radius, cy + radius },
             { 0.0f, 0.0f }, { 1.0f, 1.0f },
-            IM_COL32(255, 255, 255, 255),
+            Theme::Get().AvatarImageTint,
             radius);
     } else {
         // Colored circle with letter fallback
@@ -446,13 +443,13 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
     std::string label;
 
     if (connected) {
-        dotCol = Colors.StatusOnline;
+        dotCol = Theme::Get().StatusOnline;
         label  = "Connected  (" + StatusProtocol + ")";
     } else if (handshaking) {
-        dotCol = Colors.StatusPending;
+        dotCol = Theme::Get().StatusPending;
         label  = "Handshaking...";
     } else {
-        dotCol = Colors.StatusOffline;
+        dotCol = Theme::Get().StatusOffline;
         label  = "Disconnected";
     }
 
@@ -465,13 +462,16 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
     const float regionW = ImGui::GetContentRegionAvail().x + startX; // total width
     const float rightPad = startX; // match left padding on right side
 
-    // ── In private mode: [avatar] [name] [dot] ............. [Leave] ────
-    // The "Connected (...)" label is omitted to save horizontal space;
-    // the status dot alone conveys the connection state.
+    // ── In private mode: [name] [dot] ......................... [Leave] ────
+    // Layout matches lobby mode height: one line of bold text + 4px padding.
+    // No avatar — it's already visible in the sidebar.
     if (m_PrivateMode) {
-        // Measure Leave button so we can reserve space on the right
-        constexpr float btnPadX = 10.0f;
-        constexpr float btnPadY = 3.0f;
+        // Measure text height to size the Leave button
+        float lineH = FontHeight(bold);
+
+        // Measure Leave button — compact, fits within the text line
+        constexpr float btnPadX = 8.0f;
+        constexpr float btnPadY = 0.0f;
         ImVec2 leaveSz = MeasureText(body, "Leave");
         const float btnW = leaveSz.x + btnPadX * 2.0f;
 
@@ -479,28 +479,14 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
         const float leaveX = regionW - rightPad - btnW;
         const float nameRightEdge = leaveX - 20.0f; // gap before button
 
-        float cursorX = startX;
-
-        // Avatar circle
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        constexpr float iconR = 12.0f;
-        float iconCx = pos.x + iconR;
-        float iconCy = pos.y + FontHeight(bold) * 0.5f;
-        char letter = peer.empty() ? '?' : (char)toupper(peer[0]);
-        DrawAvatar(dl, iconCx, iconCy, iconR, letter,
-                   Colors.Accent, Colors.AccentText,
-                   m_PeerAvatarTex ? m_PeerAvatarTex : ImTextureID{});
-        cursorX = startX + iconR * 2.0f + 8.0f;
-        ImGui::SetCursorPosX(cursorX);
-
         // Peer name (truncated to fit before Leave button)
         {
-            const float maxNameW = nameRightEdge - cursorX;
-            ImVec2 nameSz = MeasureText(bold, peer.c_str());
+            const float maxNameW = nameRightEdge - startX;
 
             if (bold) ImGui::PushFont(bold);
+            ImVec2 nameSz = MeasureText(bold, peer.c_str());
             if (nameSz.x <= maxNameW || maxNameW <= 0) {
-                ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", peer.c_str());
+                ImGui::TextColored(U32ToVec4(Theme::Get().TextPrimary), "%s", peer.c_str());
             } else {
                 // Truncate with ellipsis
                 std::string truncated = peer;
@@ -513,30 +499,30 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
                         break;
                     }
                 }
-                ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", truncated.c_str());
+                ImGui::TextColored(U32ToVec4(Theme::Get().TextPrimary), "%s", truncated.c_str());
             }
             if (bold) ImGui::PopFont();
         }
 
         ImGui::SameLine(0.0f, 8.0f);
 
-        // Status dot (compact, no label)
+        // Status dot (compact, no label — same as lobby dot)
         ImVec2 dotPos = ImGui::GetCursorScreenPos();
         float textH = ImGui::GetFontSize();
         dl->AddCircleFilled({ dotPos.x + 4.0f, dotPos.y + textH * 0.5f },
                             4.0f, dotCol, 12);
         ImGui::Dummy({ 12.0f, textH }); // advance past dot
 
-        // Leave button pinned to right
+        // Leave button pinned to right, vertically centred within the line
         if (m_OnLeave) {
             ImGui::SameLine();
             ImGui::SetCursorPosX(leaveX);
 
-            ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 50, 50, 200));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(180, 60, 60, 230));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(200, 70, 70, 255));
-            ImGui::PushStyleColor(ImGuiCol_Text,           IM_COL32(255, 255, 255, 255));
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button,        Theme::Get().DangerBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  Theme::Get().DangerBtnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   Theme::Get().DangerBtnActive);
+            ImGui::PushStyleColor(ImGuiCol_Text,           Theme::Get().AvatarLetterCol);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { btnPadX, btnPadY });
 
             if (ImGui::Button("Leave##pvt")) {
@@ -555,7 +541,7 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
 
     // Peer name
     if (bold) ImGui::PushFont(bold);
-    ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", peer.c_str());
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextPrimary), "%s", peer.c_str());
     if (bold) ImGui::PopFont();
 
     ImGui::SameLine(0.0f, 12.0f);
@@ -567,7 +553,7 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
                         4.0f, dotCol, 12);
 
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 14.0f);
-    ImGui::TextColored(U32ToVec4(Colors.TextSecondary), "%s", label.c_str());
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "%s", label.c_str());
 
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
 }
@@ -590,13 +576,13 @@ void ChatPanel::RenderInputBar(float areaWidth, const std::string&) {
     dl->AddRectFilled(
         { inputPos.x - 1, inputPos.y - 1 },
         { inputPos.x + inputW + 1, inputPos.y + inputH + 2 },
-        Colors.InputShadow, kInputRounding + 1);
+        Theme::Get().InputShadow, kInputRounding + 1);
     dl->AddRectFilled(inputPos,
         { inputPos.x + inputW, inputPos.y + inputH },
-        Colors.InputBg, kInputRounding);
+        Theme::Get().BgInput, kInputRounding);
     dl->AddRect(inputPos,
         { inputPos.x + inputW, inputPos.y + inputH },
-        Colors.InputBorder, kInputRounding, 0, 1.2f);
+        Theme::Get().InputBorder, kInputRounding, 0, 1.2f);
 
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
         { 14.0f, (inputH - ImGui::GetFontSize()) * 0.5f });
@@ -605,7 +591,7 @@ void ChatPanel::RenderInputBar(float areaWidth, const std::string&) {
     ImGui::PushStyleColor(ImGuiCol_FrameBg,       IM_COL32(0,0,0,0));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0,0,0,0));
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_Text, U32ToVec4(Colors.TextPrimary));
+    ImGui::PushStyleColor(ImGuiCol_Text, U32ToVec4(Theme::Get().TextPrimary));
 
     ImGui::PushItemWidth(inputW);
     ImFont* body = GetBodyFont();
@@ -626,10 +612,10 @@ void ChatPanel::RenderInputBar(float areaWidth, const std::string&) {
     float btnY = ImGui::GetCursorPosY() + (inputH - btnW) * 0.5f;
     ImGui::SetCursorPosY(btnY);
 
-    ImGui::PushStyleColor(ImGuiCol_Button,       U32ToVec4(Colors.Accent));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, U32ToVec4(Colors.AccentHover));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  U32ToVec4(Colors.AccentHover));
-    ImGui::PushStyleColor(ImGuiCol_Text,          U32ToVec4(Colors.AccentText));
+    ImGui::PushStyleColor(ImGuiCol_Button,       U32ToVec4(Theme::Get().Accent));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, U32ToVec4(Theme::Get().AccentHover));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  U32ToVec4(Theme::Get().AccentHover));
+    ImGui::PushStyleColor(ImGuiCol_Text,          U32ToVec4(Theme::Get().AccentText));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btnW * 0.5f);
 
     bool clicked = ImGui::Button(">", { btnW, btnW });

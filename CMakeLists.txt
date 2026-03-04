@@ -104,7 +104,6 @@ add_library(CoreLib STATIC
         Core/src/Random.cpp
         Core/src/UI.cpp
         Core/src/ConsoleGUI.cpp
-        Core/src/Theme.cpp
         Core/src/Log.cpp
         Core/src/Input.cpp
         Core/src/Client.cpp
@@ -116,7 +115,6 @@ add_library(CoreLib STATIC
         Core/src/Console.cpp
         Core/src/PrivateChatSession.cpp
         Core/src/ChatPanel.cpp
-        Core/include/ChatPanel.h
 )
 
 # ─────────────────────────────────────────────────────────────────────────────

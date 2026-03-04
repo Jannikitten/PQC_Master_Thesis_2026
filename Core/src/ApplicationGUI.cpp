@@ -459,8 +459,6 @@ namespace Safira {
         ImGuiIO& io = ImGui::GetIO(); (void)io;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-        UI::SetSafiraTheme();
-
         ImGuiStyle& style = ImGui::GetStyle();
         style.WindowPadding    = ImVec2(10.0f, 10.0f);
         style.FramePadding     = ImVec2(8.0f, 6.0f);
@@ -586,10 +584,10 @@ namespace Safira {
         m_CachedShowDot  = false;
 
         auto* bgDl = ImGui::GetBackgroundDrawList();
-        bgDl->AddRectFilled(tbMin, tbMax, IM_COL32(28, 28, 28, 255));
+        bgDl->AddRectFilled(tbMin, tbMax, Theme::Get().BgTitlebar);
         // Separator line between titlebar and content below
         bgDl->AddLine({ tbMin.x, tbMax.y }, { tbMax.x, tbMax.y },
-                       IM_COL32(48, 48, 48, 255), 1.0f);
+                       Theme::Get().Separator, 1.0f);
 
         // ── Drag detection (mouse-rect only, no InvisibleButton) ────────────
         m_TitleBarHovered = ImGui::IsMouseHoveringRect(tbMin, tbMax, false);
@@ -645,10 +643,10 @@ namespace Safira {
                     { ax - avatarR, tbCenterY - avatarR },
                     { ax + avatarR, tbCenterY + avatarR },
                     { 0, 0 }, { 1, 1 },
-                    IM_COL32(255, 255, 255, 255), avatarR);
+                    Theme::Get().AvatarImageTint, avatarR);
             } else {
                 dl->AddCircleFilled({ ax, tbCenterY }, avatarR,
-                    IM_COL32(218, 185, 107, 180), 24);
+                    Theme::Get().Accent, 24);
 
                 char letter = m_TitlebarUserName.empty()
                     ? 'S' : (char)toupper(m_TitlebarUserName[0]);
@@ -658,7 +656,7 @@ namespace Safira {
                 ImVec2 lsz = ImGui::CalcTextSize(buf);
                 dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                     { ax - lsz.x * 0.5f, tbCenterY - lsz.y * 0.5f },
-                    IM_COL32(18, 18, 18, 255), buf);
+                    Theme::Get().AccentText, buf);
                 if (bold) ImGui::PopFont();
             }
 
@@ -669,7 +667,7 @@ namespace Safira {
                 ImVec2 nameSz = ImGui::CalcTextSize(m_TitlebarUserName.c_str());
                 dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                     { textX, tbCenterY - nameSz.y * 0.5f },
-                    IM_COL32(185, 185, 185, 220),
+                    Theme::Get().TextTitlebar,
                     m_TitlebarUserName.c_str());
                 if (body) ImGui::PopFont();
 
@@ -681,9 +679,9 @@ namespace Safira {
                 const bool isAway   = m_TitlebarConnected && !m_TitlebarUserOnline;
                 const bool isOffline = !m_TitlebarConnected;
                 ImU32 dotCol;
-                if (isOffline)       dotCol = IM_COL32(130, 130, 130, 140);
-                else if (isAway)     dotCol = IM_COL32(210, 170, 50, 220);
-                else                 dotCol = IM_COL32(76, 200, 76, 255);
+                if (isOffline)       dotCol = Theme::Get().StatusDotInactive;
+                else if (isAway)     dotCol = Theme::Get().StatusAway;
+                else                 dotCol = Theme::Get().StatusOnline;
 
                 dl->AddCircleFilled({ cx, tbCenterY }, dotR, dotCol, 12);
 
@@ -749,10 +747,10 @@ namespace Safira {
 
         ImGui::SetCursorPos({ toggleX, toggleY });
 
-        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(255, 255, 255, 20));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(255, 255, 255, 35));
-        ImGui::PushStyleColor(ImGuiCol_Border,         IM_COL32(48, 48, 48, 255));
+        ImGui::PushStyleColor(ImGuiCol_Button,        Theme::Get().GhostBtnBg);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  Theme::Get().GhostBtnHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   Theme::Get().GhostBtnActive);
+        ImGui::PushStyleColor(ImGuiCol_Border,         Theme::Get().Separator);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
 
@@ -771,8 +769,8 @@ namespace Safira {
                 tMin.y + toggleSz * 0.5f
             };
             const ImU32 iconCol = m_ChatPanelVisible
-                ? IM_COL32(218, 185, 107, 230)
-                : IM_COL32(140, 140, 140, 130);
+                ? Theme::Get().ToggleIconActive
+                : Theme::Get().ToggleIconInactive;
 
             const float bw = 13.0f, bh = 9.0f;
             const ImVec2 bubMin = { tCen.x - bw*0.5f, tCen.y - bh*0.5f - 1.f };
@@ -801,10 +799,10 @@ namespace Safira {
             ImGui::SetCursorPos({ logoutX, logoutY });
 
             // Ghost button — same style as chat toggle
-            ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(200, 80, 80, 30));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(200, 80, 80, 55));
-            ImGui::PushStyleColor(ImGuiCol_Border,         IM_COL32(48, 48, 48, 255));
+            ImGui::PushStyleColor(ImGuiCol_Button,        Theme::Get().GhostBtnBg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  Theme::Get().LogoutBtnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   Theme::Get().LogoutBtnActive);
+            ImGui::PushStyleColor(ImGuiCol_Border,         Theme::Get().Separator);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
 
@@ -824,8 +822,8 @@ namespace Safira {
 
                 const bool hov = ImGui::IsItemHovered();
                 const ImU32 col = hov
-                    ? IM_COL32(240, 90, 90, 255)
-                    : IM_COL32(190, 90, 90, 200);
+                    ? Theme::Get().LogoutIconHover
+                    : Theme::Get().LogoutIcon;
                 const float t = 1.6f;  // stroke thickness
 
                 // Door frame (open rectangle, left side missing)
@@ -862,6 +860,72 @@ namespace Safira {
             if (ImGui::IsItemHovered()) {
                 m_TitleBarHovered = false;
                 ImGui::SetTooltip("Logout");
+            }
+
+            // ── Theme toggle button (left of logout) ────────────────────────
+            constexpr float themeSz = 30.0f;
+            const float themeX = logoutX - gap - themeSz;
+            const float themeY = (tbH - themeSz) * 0.5f;
+
+            ImGui::SetCursorPos({ themeX, themeY });
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        Theme::Get().GhostBtnBg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  Theme::Get().GhostBtnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   Theme::Get().GhostBtnActive);
+            ImGui::PushStyleColor(ImGuiCol_Border,         Theme::Get().Separator);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+
+            if (ImGui::Button("##ThemeToggle", { themeSz, themeSz })) {
+                Theme::Toggle();
+            }
+
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+
+            // Draw sun or moon icon
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 bMin = ImGui::GetItemRectMin();
+                const float icx = bMin.x + themeSz * 0.5f;
+                const float icy = bMin.y + themeSz * 0.5f;
+
+                const bool hov = ImGui::IsItemHovered();
+                const ImU32 iconCol = hov
+                    ? Theme::Get().ToggleIconActive
+                    : Theme::Get().ToggleIconInactive;
+
+                if (Theme::IsDark()) {
+                    // Sun icon — circle + rays (switch TO light)
+                    constexpr float sr = 4.0f;
+                    dl->AddCircleFilled({ icx, icy }, sr, iconCol, 16);
+                    for (int i = 0; i < 8; ++i) {
+                        float angle = i * (3.14159f * 2.0f / 8.0f);
+                        float inner = sr + 2.5f;
+                        float outer = sr + 5.0f;
+                        dl->AddLine(
+                            { icx + cosf(angle) * inner, icy + sinf(angle) * inner },
+                            { icx + cosf(angle) * outer, icy + sinf(angle) * outer },
+                            iconCol, 1.4f);
+                    }
+                } else {
+                    // Moon icon — crescent (switch TO dark)
+                    constexpr float mr = 6.0f;
+                    dl->AddCircleFilled({ icx, icy }, mr, iconCol, 24);
+                    // Cut out a circle to create crescent
+                    const ImU32 btnBg = hov
+                        ? Theme::Get().GhostBtnHover
+                        : Theme::Get().GhostBtnBg;
+                    dl->AddCircleFilled(
+                        { icx + 3.5f, icy - 2.5f }, mr - 1.0f,
+                        btnBg, 24);
+                }
+            }
+
+            if (ImGui::IsItemHovered()) {
+                m_TitleBarHovered = false;
+                ImGui::SetTooltip(Theme::IsDark()
+                    ? "Switch to light mode" : "Switch to dark mode");
             }
         }
 
@@ -949,11 +1013,11 @@ namespace Safira {
 
         // Outer circle
         constexpr float radius = 72.0f;
-        dl->AddCircleFilled(center, radius, IM_COL32(218, 185, 107, 16), 48);
-        dl->AddCircle(center, radius,       IM_COL32(218, 185, 107, 28), 48, 2.0f);
+        dl->AddCircleFilled(center, radius, Theme::Get().AccentFaded, 48);
+        dl->AddCircle(center, radius,       Theme::Get().AccentRing, 48, 2.0f);
 
         // Inner ring
-        dl->AddCircle(center, radius - 8.0f, IM_COL32(218, 185, 107, 14), 48, 1.5f);
+        dl->AddCircle(center, radius - 8.0f, Theme::Get().AccentRingInner, 48, 1.5f);
 
         // Large "S" — use the Bold font at a scaled-up size
         ImFont* bold = GetFont("Bold");
@@ -963,7 +1027,7 @@ namespace Safira {
         ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, letter);
         dl->AddText(font, fontSize,
             { center.x - sz.x * 0.5f, center.y - sz.y * 0.5f },
-            IM_COL32(218, 185, 107, 32), letter);
+            Theme::Get().AccentFaded, letter);
 
         // Tagline below the circle
         const char* tagline = "Post-Quantum Secure Messaging";
@@ -972,7 +1036,7 @@ namespace Safira {
         ImGui::PopFont();
         dl->AddText(font, font->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, "X").y,
             { center.x - tagSz.x * 0.5f, center.y + radius + 22.0f },
-            IM_COL32(160, 160, 160, 35), tagline);
+            Theme::Get().TextTagline, tagline);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -987,12 +1051,12 @@ namespace Safira {
 
         ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
 
-        // Dark clear colour matching the Safira theme background
-        ImVec4 clear_color = ImVec4(0.14f, 0.14f, 0.14f, 1.0f);
+        // Clear colour is re-evaluated each frame to reflect theme changes
         ImGuiIO& io = ImGui::GetIO();
 
         while (!glfwWindowShouldClose(m_WindowHandle) && m_Running)
         {
+            ImVec4 clear_color = Theme::Get().ClearColor();
             glfwPollEvents();
 
             {
@@ -1057,22 +1121,14 @@ namespace Safira {
 
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                     isMaximized ? ImVec2(6.0f, 6.0f) : ImVec2(1.0f, 1.0f));
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 3.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
                 ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4{ 0, 0, 0, 0 });
-                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::Get().ClearColor());
                 ImGui::Begin("SafiraMainWindow", nullptr, window_flags);
                 ImGui::PopStyleColor(2);
                 ImGui::PopStyleVar(2);  // WindowPadding, WindowBorderSize
                 ImGui::PopStyleVar(2);  // WindowRounding, WindowBorderSize(outer)
-
-                // Window border
-                {
-                    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(50, 50, 50, 255));
-                    if (!isMaximized)
-                        UI::RenderWindowOuterBorders(ImGui::GetCurrentWindow());
-                    ImGui::PopStyleColor();
-                }
 
                 // Custom titlebar - phase 1: background + visuals only
                 if (m_Specification.CustomTitlebar) {
