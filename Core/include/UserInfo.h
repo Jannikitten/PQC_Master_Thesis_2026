@@ -7,24 +7,35 @@
 // §5.3  Serialization  – free-function Serialize / Deserialize overloads
 //                        constrained by concepts (Serialization.h)
 // C++23               – std::expected, concepts
+//
+// v2: AvatarData added — raw RGBA pixels (64×64, ≤ 16 KB).  Transmitted with
+//     every client-list update.  Empty = letter-circle fallback.
+//     IconIndex removed — replaced by avatar image or random colour.
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Serialization.h"
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Safira {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Icons — 8 predefined coloured circles drawn via ImDrawList.
-// The index is stored in UserInfo and transmitted with every client list update.
+// Avatar constants
 // ─────────────────────────────────────────────────────────────────────────────
-namespace Icons {
+static constexpr int    kAvatarPixelSize = 64;           // target square size
+static constexpr size_t kMaxAvatarBytes  = kAvatarPixelSize * kAvatarPixelSize * 4;  // 16 KB raw RGBA
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Random avatar colours — used when no image is set.
+// Server assigns one at registration time.  8 visually distinct hues.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace AvatarColors {
     static constexpr int kCount = 8;
 
     // ABGR colours (ImGui IM_COL32 byte order)
-    static constexpr uint32_t kColors[kCount] = {
+    static constexpr uint32_t kPalette[kCount] = {
         0xFF4444EE, // Red
         0xFF44CC44, // Green
         0xFFEE8844, // Orange
@@ -34,27 +45,28 @@ namespace Icons {
         0xFF44EECC, // Teal
         0xFFEEEEEE, // White
     };
-
-    static constexpr const char* kLabels[kCount] = {
-        "Red", "Green", "Orange", "Blue",
-        "Yellow", "Purple", "Teal", "White",
-    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UserInfo
+//
+// Color is now server-assigned (random from AvatarColors).
+// AvatarData carries raw RGBA pixels of the user's chosen image
+// (kAvatarPixelSize × kAvatarPixelSize × 4 channels).
+// When empty the client falls back to a coloured-circle + letter.
 // ─────────────────────────────────────────────────────────────────────────────
 struct UserInfo {
-    uint32_t    Color     = 0xFFFFFFFF;
-    std::string Username;
-    uint8_t     IconIndex = 0;          // index into Icons::kColors[]
+    uint32_t              Color      = 0xFFFFFFFF;
+    std::string           Username;
+    std::vector<uint8_t>  AvatarData;    // raw RGBA, ≤ kMaxAvatarBytes
 };
 
-// §5.3 — Free-function serialization (concept-based, replaces old static methods)
+// §5.3 — Free-function serialization
+
 [[nodiscard]] inline bool Serialize(BufferWriter& w, const UserInfo& u) {
     return Serialize(w, u.Color)
         && Serialize(w, u.Username)
-        && Serialize(w, u.IconIndex);
+        && Serialize(w, u.AvatarData);
 }
 
 template <>
@@ -64,9 +76,9 @@ Deserialize<UserInfo>(BufferReader& r) {
     if (!color) return std::unexpected(color.error());
     auto username = Deserialize<std::string>(r);
     if (!username) return std::unexpected(username.error());
-    auto icon = Deserialize<uint8_t>(r);
-    if (!icon) return std::unexpected(icon.error());
-    return UserInfo{ *color, std::move(*username), *icon };
+    auto avatar = DeserializeVector<uint8_t>(r);
+    if (!avatar) return std::unexpected(avatar.error());
+    return UserInfo{ *color, std::move(*username), std::move(*avatar) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

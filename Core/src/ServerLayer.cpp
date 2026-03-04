@@ -29,6 +29,7 @@
 #include <chrono>
 #include <fstream>
 #include <print>
+#include <random>
 #include <ranges>
 
 #include <spdlog/spdlog.h>
@@ -77,6 +78,19 @@ void ServerLayer::OnAttach() {
 
     m_Console.AddTaggedMessage("Info", "Started server on port {} (max {} clients)",
                                config.Port, config.MaxClients);
+
+    // Display available commands on startup
+    m_Console.AddItalicMessage("");
+    m_Console.AddItalicMessage("Available server commands:");
+    m_Console.AddItalicMessage("  /kick <user> [reason]  — disconnect a user");
+    m_Console.AddItalicMessage("  /mute <user>           — silence a user (broadcast to all)");
+    m_Console.AddItalicMessage("  /unmute <user>         — restore a user's voice");
+    m_Console.AddItalicMessage("  /list                  — show connected clients with uptime");
+    m_Console.AddItalicMessage("  /stats                 — server-wide statistics");
+    m_Console.AddItalicMessage("  /broadcast <msg>       — send server announcement");
+    m_Console.AddItalicMessage("  /motd [msg]            — set/clear message of the day");
+    m_Console.AddItalicMessage("  /help                  — show this list again");
+    m_Console.AddItalicMessage("");
     m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
 }
 
@@ -229,12 +243,20 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
             SendClientConnectionRequestResponse(clientInfo, isValid);
 
             if (isValid) {
-                m_Console.AddMessage("Welcome {} (icon={}) from {}",
-                                    pkt.Username, pkt.IconIndex, clientInfo.AddressStr);
+                // Assign a random colour from the palette
+                static std::mt19937 rng(std::random_device{}());
+                const uint32_t color = Safira::AvatarColors::kPalette[
+                    rng() % Safira::AvatarColors::kCount];
+
+                m_Console.AddMessage("Welcome {} from {}",
+                                    pkt.Username, clientInfo.AddressStr);
                 auto& client     = m_ConnectedClients[clientInfo.ID];
                 client.Username  = pkt.Username;
-                client.Color     = pkt.Color;
-                client.IconIndex = pkt.IconIndex;
+                client.Color     = color;
+
+                // Store avatar if provided and within size limit
+                if (pkt.AvatarData.size() <= Safira::kMaxAvatarBytes)
+                    client.AvatarData = pkt.AvatarData;
 
                 SendClientConnect(clientInfo);
                 SendClientList(clientInfo);
@@ -538,6 +560,12 @@ void ServerLayer::OnCommand(std::string_view command) {
             if (FindClientID(target)) {
                 m_MutedUsers.insert(target);
                 m_Console.AddItalicMessage("User {} is now muted.", target);
+
+                // Broadcast mute notification to all clients
+                Safira::BufferWriter writer(m_ScratchBuffer);
+                Safira::SerializePacket(writer, Safira::ServerMessagePacket{
+                    "SERVER", std::format("{} has been muted by the server.", target) });
+                m_Server->SendToAllClients(writer.Written());
             } else {
                 m_Console.AddItalicMessage("User {} not found.", target);
             }
@@ -549,10 +577,17 @@ void ServerLayer::OnCommand(std::string_view command) {
     else if (cmd == "unmute") {
         if (tokens.size() == 2) {
             auto target = std::string(tokens[1]);
-            if (m_MutedUsers.erase(target))
+            if (m_MutedUsers.erase(target)) {
                 m_Console.AddItalicMessage("User {} is now unmuted.", target);
-            else
+
+                // Broadcast unmute notification to all clients
+                Safira::BufferWriter writer(m_ScratchBuffer);
+                Safira::SerializePacket(writer, Safira::ServerMessagePacket{
+                    "SERVER", std::format("{} has been unmuted.", target) });
+                m_Server->SendToAllClients(writer.Written());
+            } else {
                 m_Console.AddItalicMessage("User {} was not muted.", target);
+            }
         } else {
             m_Console.AddItalicMessage("Usage: /unmute <username>");
         }

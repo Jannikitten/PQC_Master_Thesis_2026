@@ -12,10 +12,6 @@ namespace Safira {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Server-side: deserialise a packet received from a client.
-//
-// Reads the PacketType tag, then the payload fields in wire-format order.
-// The switch here is internal — callers dispatch via std::visit on the
-// returned variant, never on raw PacketType values.
 // ─────────────────────────────────────────────────────────────────────────────
 std::expected<ServerIncomingPacket, ParseError>
 DeserializeServerPacket(BufferReader& r) {
@@ -33,11 +29,11 @@ DeserializeServerPacket(BufferReader& r) {
     case PacketType::ClientConnectionRequest: {
         auto color = Deserialize<uint32_t>(r);
         if (!color) return std::unexpected(color.error());
-        auto icon = Deserialize<uint8_t>(r);
-        if (!icon) return std::unexpected(icon.error());
         auto name = Deserialize<std::string>(r);
         if (!name) return std::unexpected(name.error());
-        return ConnectionRequestPacket{ *color, *icon, std::move(*name) };
+        auto avatar = DeserializeVector<uint8_t>(r);
+        if (!avatar) return std::unexpected(avatar.error());
+        return ConnectionRequestPacket{ *color, std::move(*name), std::move(*avatar) };
     }
 
     case PacketType::PrivateChatInvite: {

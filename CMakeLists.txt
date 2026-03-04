@@ -115,12 +115,12 @@ add_library(CoreLib STATIC
         Core/src/Console.cpp
         Core/src/PrivateChatSession.cpp
         Core/src/ChatPanel.cpp
-        Core/include/MacosWindow.h
+        Core/src/Theme.cpp
 )
 
 # macOS: compile the Objective-C++ native window helper (once, outside the loop)
 if(APPLE)
-        target_sources(CoreLib PRIVATE Core/include/MacOSWindow.mm)
+        target_sources(CoreLib PRIVATE Core/include/MacOSWindow.mm Core/include/FileDialog.mm)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +199,7 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 target_link_libraries(${TGT} PRIVATE
                         "-framework Foundation" "-framework Cocoa" "-framework IOKit"
                         "-framework CoreVideo" "-framework Metal" "-framework QuartzCore"
+                        "-framework UniformTypeIdentifiers"
                 )
         elseif(WIN32)
                 target_link_libraries(${TGT} PRIVATE

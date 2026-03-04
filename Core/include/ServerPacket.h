@@ -8,8 +8,9 @@
 // §3.4  Strong types  – each packet is a distinct struct, not a bare enum
 // C++23              – std::variant, std::visit, concepts
 //
-// The enum is KEPT for wire-format tagging (first uint32_t of every packet).
-// Dispatch is via std::variant + std::visit, not switch statements.
+// v2: ConnectionRequestPacket now carries AvatarData (raw RGBA pixels)
+//     instead of IconIndex.  Color is still transmitted but is server-
+//     assigned random (client sends its preferred, server may override).
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Serialization.h"
@@ -22,7 +23,7 @@
 namespace Safira {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire-format packet type tag (unchanged from original)
+// Wire-format packet type tag
 // ─────────────────────────────────────────────────────────────────────────────
 enum class PacketType : uint32_t {
     None                  = 0,
@@ -58,7 +59,7 @@ enum class PacketType : uint32_t {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Packet structs — each carries a static PacketType tag for serialization
+// Packet structs
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Client → Server packets ─────────────────────────────────────────────────
@@ -68,11 +69,13 @@ struct MessagePacket {
     std::string Message;
 };
 
+/// v2: AvatarData replaces IconIndex.
+///     Color is client-suggested; server may override with a random colour.
 struct ConnectionRequestPacket {
     static constexpr auto kType = PacketType::ClientConnectionRequest;
-    uint32_t    Color;
-    uint8_t     IconIndex;
-    std::string Username;
+    uint32_t              Color;
+    std::string           Username;
+    std::vector<uint8_t>  AvatarData;    // raw RGBA, ≤ kMaxAvatarBytes
 };
 
 struct PrivateChatInvitePacket {
@@ -175,8 +178,8 @@ using ClientIncomingPacket = std::variant<
 
 [[nodiscard]] inline bool Serialize(BufferWriter& w, const ConnectionRequestPacket& p) {
     return Serialize(w, p.Color)
-        && Serialize(w, p.IconIndex)
-        && Serialize(w, p.Username);
+        && Serialize(w, p.Username)
+        && Serialize(w, p.AvatarData);
 }
 
 [[nodiscard]] inline bool Serialize(BufferWriter& w, const PrivateChatInvitePacket& p) {

@@ -13,11 +13,12 @@ using Safira::U32ToVec4;
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <numeric>
 #include <ranges>
 #include <format>
 
 #include <spdlog/spdlog.h>
-#include <stb_image.h>
 
 // Font-safe helpers -- ZERO direct ImFont member access (no ->FontSize).
 namespace {
@@ -55,24 +56,20 @@ void SidebarDrawTextAt(ImFont* f, ImVec2 pos, ImU32 col,
     if (f) ImGui::PopFont();
 }
 
-// Draw text truncated with "..." if it exceeds maxW pixels.
 void SidebarDrawTextTruncated(ImFont* f, ImVec2 pos, ImU32 col,
                               const char* text, float maxW) {
     if (f) ImGui::PushFont(f);
 
     ImVec2 fullSz = ImGui::CalcTextSize(text);
     if (fullSz.x <= maxW) {
-        // Fits — draw normally
         ImGui::GetWindowDrawList()->AddText(
             ImGui::GetFont(), ImGui::GetFontSize(), pos, col, text);
     } else {
-        // Truncate: find how many chars fit, then append "..."
         const char* ellipsis = "...";
         float ellipsisW = ImGui::CalcTextSize(ellipsis).x;
         float availW = maxW - ellipsisW;
         if (availW < 0.0f) availW = 0.0f;
 
-        // Binary-ish search for the longest substring that fits
         int len = (int)strlen(text);
         int lo = 0, hi = len, best = 0;
         while (lo <= hi) {
@@ -86,7 +83,6 @@ void SidebarDrawTextTruncated(ImFont* f, ImVec2 pos, ImU32 col,
             }
         }
 
-        // Build truncated string
         std::string trunc(text, best);
         trunc += ellipsis;
         ImGui::GetWindowDrawList()->AddText(
@@ -96,12 +92,52 @@ void SidebarDrawTextTruncated(ImFont* f, ImVec2 pos, ImU32 col,
     if (f) ImGui::PopFont();
 }
 
+// Simple hash for detecting avatar data changes (avoids re-uploading
+// unchanged textures every frame).
+size_t HashAvatarData(const std::vector<uint8_t>& data) {
+    // FNV-1a-ish — fast, good enough for change detection
+    size_t h = 14695981039346656037ULL;
+    for (auto b : data) {
+        h ^= static_cast<size_t>(b);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 } // anon namespace
 
-static void DrawIconShape(ImDrawList* draw, ImVec2 center, float radius, uint8_t idx) {
-    const uint32_t col = Safira::Icons::kColors[idx % Safira::Icons::kCount];
-    draw->AddCircleFilled(center, radius, col);
-    draw->AddCircle(center, radius, Theme::Get().IconOutline, 0, 1.5f);
+// =========================================================================
+// DrawAvatarCircle — image avatar or coloured letter fallback
+// =========================================================================
+
+void ClientLayer::DrawAvatarCircle(ImDrawList* dl, ImVec2 center, float radius,
+                                   uint32_t color, const std::string& username,
+                                   ImTextureID tex) {
+    if (tex) {
+        // Round-clipped avatar image
+        dl->AddImageRounded(tex,
+            { center.x - radius, center.y - radius },
+            { center.x + radius, center.y + radius },
+            { 0, 0 }, { 1, 1 },
+            Theme::Get().AvatarImageTint, radius);
+    } else {
+        // Coloured circle + first letter
+        dl->AddCircleFilled(center, radius, color, 24);
+        dl->AddCircle(center, radius, Theme::Get().IconOutline, 0, 1.5f);
+
+        char letter = username.empty()
+            ? '?'
+            : static_cast<char>(toupper(username[0]));
+        char buf[2] = { letter, '\0' };
+
+        ImFont* bold = SidebarBoldFont();
+        ImVec2 lsz = SidebarMeasureText(bold, buf);
+        if (bold) ImGui::PushFont(bold);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    { center.x - lsz.x * 0.5f, center.y - lsz.y * 0.5f },
+                    Theme::Get().AvatarLetterCol, buf);
+        if (bold) ImGui::PopFont();
+    }
 }
 
 // =========================================================================
@@ -119,7 +155,6 @@ void ClientLayer::OnAttach() {
 
     m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
 
-    // Set logout callback for titlebar button
     auto& app = Safira::ApplicationGUI::Get();
     app.m_OnLogout = [this]() { Logout(); };
 
@@ -135,6 +170,7 @@ void ClientLayer::OnDetach() {
 
 void ClientLayer::OnUIRender() {
     UI_ConnectionModal();
+    UI_CropModal();
     UI_IncomingInvites();
     UI_ReportModal();
     UI_UnifiedChatWindow();
@@ -150,16 +186,8 @@ bool ClientLayer::IsConnected() const {
 
 void ClientLayer::OnDisconnectButton() { m_Client->Disconnect(); }
 
-void ClientLayer::DrawUserIcon(uint8_t iconIndex, float size, bool /*clickable*/) {
-    const ImVec2 pos    = ImGui::GetCursorScreenPos();
-    const float  radius = size * 0.45f;
-    const ImVec2 center = { pos.x + size * 0.5f, pos.y + size * 0.5f };
-    DrawIconShape(ImGui::GetWindowDrawList(), center, radius, iconIndex);
-    ImGui::Dummy({ size, size });
-}
-
 // =========================================================================
-// AddLobbyMessage -- TIMESTAMP BUG FIX: set time at creation
+// AddLobbyMessage — attaches avatar texture for rendering
 // =========================================================================
 
 void ClientLayer::AddLobbyMessage(const std::string& who,
@@ -172,13 +200,15 @@ void ClientLayer::AddLobbyMessage(const std::string& who,
         .Text      = text,
         .Color     = color,
         .Role      = role,
-        .Time      = Safira::ChatPanel::NowTimestamp(),   // ← FIX: set NOW
+        .Time      = Safira::ChatPanel::NowTimestamp(),
         .AvatarTex = {},
     });
 
-    // Set avatar texture for the user's own messages
+    // Attach avatar texture: own or peer
     if (who == m_Username && m_AvatarTexture) {
         m_LobbyMessages.back().AvatarTex = m_AvatarTexture;
+    } else if (auto it = m_PeerAvatars.find(who); it != m_PeerAvatars.end()) {
+        m_LobbyMessages.back().AvatarTex = it->second.Tex;
     }
 
     if (m_ActiveConvoIdx == 0)
@@ -186,7 +216,7 @@ void ClientLayer::AddLobbyMessage(const std::string& who,
 }
 
 // =========================================================================
-// RebuildConversationList
+// RebuildConversationList — populates peer avatars from cache
 // =========================================================================
 
 void ClientLayer::RebuildConversationList() {
@@ -210,6 +240,12 @@ void ClientLayer::RebuildConversationList() {
 
     for (auto& [peer, session] : m_PrivateChats) {
         auto* entries = session->RefreshAndGetChatEntries(m_Username);
+
+        // Resolve peer avatar from cache
+        ImTextureID peerTex = {};
+        if (auto it = m_PeerAvatars.find(peer); it != m_PeerAvatars.end())
+            peerTex = it->second.Tex;
+
         m_ConversationList.push_back({
             .Title     = peer,
             .Preview   = entries->empty()
@@ -218,49 +254,114 @@ void ClientLayer::RebuildConversationList() {
             .TimeLabel = session->IsConnected() ? "online" : "",
             .Messages  = entries,
             .HasUnread = false,
-            .AvatarTex = {},
+            .AvatarTex = peerTex,
         });
     }
 }
 
 // =========================================================================
-// LoadAvatarImage -- loads file via stb_image → Safira::Image → ImTextureID
+// LoadAvatarImage — loads file → GPU texture + processes raw RGBA bytes for wire
 // =========================================================================
 
 void ClientLayer::LoadAvatarImage(const std::string& filepath) {
     if (filepath.empty()) return;
 
-    int w, h, channels;
-    unsigned char* pixels = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
-    if (!pixels) {
+    // Load raw image for dimensions + crop check
+    auto raw = Safira::LoadImageFromFile(filepath);
+    if (!raw.Valid()) {
         spdlog::warn("Failed to load avatar image: {}", filepath);
         return;
     }
 
-    m_AvatarImage = std::make_shared<Safira::Image>(
-        static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-        Safira::ImageFormat::RGBA, pixels);
-    stbi_image_free(pixels);
-
-    m_AvatarTexture = (ImTextureID)m_AvatarImage->GetDescriptorSet();
     m_AvatarImagePath = filepath;
-    spdlog::info("Avatar image loaded: {}x{} from {}", w, h, filepath);
+
+    if (raw.NeedsCrop()) {
+        // Non-square: open crop modal.  Upload full image for preview.
+        m_CropSrcWidth  = raw.Width;
+        m_CropSrcHeight = raw.Height;
+        m_CropRect      = Safira::DefaultCenterCrop(raw);
+
+        m_CropPreviewImage = std::make_shared<Safira::Image>(
+            static_cast<uint32_t>(raw.Width),
+            static_cast<uint32_t>(raw.Height),
+            Safira::ImageFormat::RGBA,
+            raw.Pixels.get());
+        m_CropPreviewTex = (ImTextureID)m_CropPreviewImage->GetDescriptorSet();
+
+        m_ShowCropModal = true;
+        spdlog::info("Avatar {}x{} is not square — opening crop UI", raw.Width, raw.Height);
+    } else {
+        // Square: process immediately
+        auto crop = Safira::DefaultCenterCrop(raw);
+        auto rgba = Safira::ProcessAvatarImage(filepath, crop);
+        if (!rgba) {
+            spdlog::warn("Avatar processing failed for {}", filepath);
+            return;
+        }
+        m_AvatarBytes = std::move(*rgba);
+
+        // Upload display texture (full resolution for local display)
+        m_AvatarImage = std::make_shared<Safira::Image>(
+            static_cast<uint32_t>(raw.Width),
+            static_cast<uint32_t>(raw.Height),
+            Safira::ImageFormat::RGBA,
+            raw.Pixels.get());
+        m_AvatarTexture = (ImTextureID)m_AvatarImage->GetDescriptorSet();
+        spdlog::info("Avatar loaded: {}x{} from {} ({} bytes raw RGBA)",
+                     raw.Width, raw.Height, filepath, m_AvatarBytes.size());
+    }
 }
 
 // =========================================================================
-// Logout -- disconnect, clear state, re-open connection modal
+// UploadPeerAvatarTexture — raw RGBA → GPU texture, cached by hash
+// =========================================================================
+
+void ClientLayer::UploadPeerAvatarTexture(const std::string& username,
+                                          const std::vector<uint8_t>& avatarData) {
+    if (avatarData.empty()) {
+        m_PeerAvatars.erase(username);
+        return;
+    }
+
+    const size_t hash = HashAvatarData(avatarData);
+
+    // Skip if unchanged
+    if (auto it = m_PeerAvatars.find(username); it != m_PeerAvatars.end()) {
+        if (it->second.DataHash == hash)
+            return;
+    }
+
+    // Avatar data is raw RGBA at kAvatarPixelSize × kAvatarPixelSize
+    const uint32_t side = Safira::kAvatarPixelSize;
+    const size_t expectedSize = side * side * 4;
+    if (avatarData.size() != expectedSize) {
+        spdlog::warn("Avatar for {} has unexpected size {} (expected {})",
+                     username, avatarData.size(), expectedSize);
+        m_PeerAvatars.erase(username);
+        return;
+    }
+
+    auto img = std::make_shared<Safira::Image>(
+        side, side, Safira::ImageFormat::RGBA, avatarData.data());
+
+    PeerAvatarCache cache;
+    cache.Image    = std::move(img);
+    cache.Tex      = (ImTextureID)cache.Image->GetDescriptorSet();
+    cache.DataHash = hash;
+    m_PeerAvatars[username] = std::move(cache);
+}
+
+// =========================================================================
+// Logout
 // =========================================================================
 
 void ClientLayer::Logout() {
-    // Close all private chats
     for (auto& [name, session] : m_PrivateChats)
         session->Close();
     m_PrivateChats.clear();
 
-    // Disconnect
     m_Client->Disconnect();
 
-    // Clear state
     m_ConnectedClients.clear();
     m_IncomingInvites.clear();
     m_PendingOutgoingInvites.clear();
@@ -274,19 +375,18 @@ void ClientLayer::Logout() {
 
     m_Console.ClearLog();
 
-    // Clear titlebar state
+    // Clear peer avatar cache
+    m_PeerAvatars.clear();
+
     auto& app = Safira::ApplicationGUI::Get();
     app.m_TitlebarUserName.clear();
     app.m_TitlebarConnected  = false;
     app.m_TitlebarAvatarTex   = ImTextureID{};
     app.m_UserManualAway      = false;
-
-    // Connection modal will re-open automatically because
-    // status != Connected triggers ImGui::OpenPopup in UI_ConnectionModal
 }
 
 // =========================================================================
-// LeavePrivateChat -- close specific private session, switch to lobby
+// LeavePrivateChat
 // =========================================================================
 
 void ClientLayer::LeavePrivateChat(const std::string& peerUsername) {
@@ -296,7 +396,7 @@ void ClientLayer::LeavePrivateChat(const std::string& peerUsername) {
         m_PrivateChats.erase(it);
     }
     m_PendingOutgoingInvites.erase(peerUsername);
-    m_ActiveConvoIdx = 0;  // switch to lobby
+    m_ActiveConvoIdx = 0;
 
     AddLobbyMessage("System",
         std::format("Left private chat with {}.", peerUsername),
@@ -304,7 +404,7 @@ void ClientLayer::LeavePrivateChat(const std::string& peerUsername) {
 }
 
 // =========================================================================
-// UI_ConnectionModal -- REDESIGNED: dark theme, no color picker, image avatar
+// UI_ConnectionModal — REDESIGNED: no colour/icon picker, image avatar only
 // =========================================================================
 
 void ClientLayer::UI_ConnectionModal() {
@@ -312,16 +412,15 @@ void ClientLayer::UI_ConnectionModal() {
         m_Client->GetConnectionStatus() != Safira::ConnectionStatus::Connected)
         ImGui::OpenPopup("Connect to Safira");
 
-    // Themed styling for the modal
     const auto& t = Theme::Get();
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,      t.BgPopup);
-    ImGui::PushStyleColor(ImGuiCol_Border,        t.ModalBorder);
-    ImGui::PushStyleColor(ImGuiCol_TitleBg,       t.BgPanel);
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, t.BgPanel);
-    ImGui::PushStyleColor(ImGuiCol_Text,          t.TextPrimary);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,       t.BgFrame);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,       t.BgPopup);
+    ImGui::PushStyleColor(ImGuiCol_Border,         t.ModalBorder);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,        t.BgPanel);
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,  t.BgPanel);
+    ImGui::PushStyleColor(ImGuiCol_Text,           t.TextPrimary);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        t.BgFrame);
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, t.BgFrameHovered);
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, t.BgFrameActive);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  t.BgFrameActive);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
 
@@ -350,57 +449,67 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::InputText("##username", &m_Username);
     ImGui::Spacing();
 
-    // ── Avatar image (replaces color picker) ─────────────────────
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Profile Image (optional)");
-    ImGui::SetNextItemWidth(220.0f);
-    ImGui::InputText("##avatarpath", &m_AvatarImagePath);
-    ImGui::SameLine();
-    if (ImGui::Button("Browse...")) {
-        // NOTE: For a full native file dialog, integrate NFD or tinyfiledialogs.
-        // This button serves as a placeholder -- user types the path manually.
-        spdlog::info("Browse for avatar image (type path manually for now)");
-    }
+    // ── Avatar image (replaces colour / icon picker) ─────────────
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Profile Image");
 
-    // Preview of avatar if loaded
-    if (m_AvatarTexture) {
-        ImGui::SameLine();
+    // Avatar preview + browse button on the same line
+    {
+        const float previewR = 24.0f;
+        const float previewSize = previewR * 2.0f;
         ImVec2 pos = ImGui::GetCursorScreenPos();
-        float r = 14.0f;
-        ImGui::GetWindowDrawList()->AddImageRounded(
-            m_AvatarTexture,
-            { pos.x, pos.y }, { pos.x + r * 2, pos.y + r * 2 },
-            { 0, 0 }, { 1, 1 }, Theme::Get().AvatarImageTint, r);
-        ImGui::Dummy({ r * 2, r * 2 });
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 center = { pos.x + previewR, pos.y + previewR };
+
+        if (m_AvatarTexture) {
+            dl->AddImageRounded(m_AvatarTexture,
+                { center.x - previewR, center.y - previewR },
+                { center.x + previewR, center.y + previewR },
+                { 0, 0 }, { 1, 1 },
+                Theme::Get().AvatarImageTint, previewR);
+        } else {
+            // Placeholder circle
+            dl->AddCircleFilled(center, previewR,
+                                IM_COL32(80, 80, 90, 255), 24);
+            char letter = m_Username.empty()
+                ? '?'
+                : static_cast<char>(toupper(m_Username[0]));
+            char buf[2] = { letter, '\0' };
+            ImVec2 lsz = ImGui::CalcTextSize(buf);
+            dl->AddText({ center.x - lsz.x * 0.5f, center.y - lsz.y * 0.5f },
+                        IM_COL32(200, 200, 210, 255), buf);
+        }
+        ImGui::Dummy({ previewSize, previewSize });
+
+        ImGui::SameLine(0, 12.0f);
+
+        // Browse button — opens native file dialog
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+        if (ImGui::Button("Browse...", { 90, previewSize })) {
+            auto path = Safira::FileDialog::OpenImage();
+            if (path) {
+                LoadAvatarImage(*path);
+            }
+        }
+        ImGui::PopStyleVar();
+
+        // Clear button if an avatar is set
+        if (m_AvatarTexture) {
+            ImGui::SameLine(0, 4.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 40, 40, 255));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+            if (ImGui::Button("Clear", { 50, previewSize })) {
+                m_AvatarTexture   = {};
+                m_AvatarImage     = nullptr;
+                m_AvatarBytes.clear();
+                m_AvatarImagePath.clear();
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
     }
 
-    ImGui::Spacing();
-
-    // ── Pick an icon (still available as fallback) ───────────────
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Fallback Icon");
-    constexpr float kIconSize = 28.0f;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    for (int i = 0; i < Safira::Icons::kCount; ++i) {
-        if (i > 0) ImGui::SameLine();
-
-        const ImVec2 pos    = ImGui::GetCursorScreenPos();
-        const float  radius = kIconSize * 0.45f;
-        const ImVec2 center = { pos.x + kIconSize * 0.5f, pos.y + kIconSize * 0.5f };
-
-        if (m_IconIndex == static_cast<uint8_t>(i))
-            dl->AddRect({ pos.x - 2, pos.y - 2 },
-                        { pos.x + kIconSize + 2, pos.y + kIconSize + 2 },
-                        Theme::Get().Accent, 3.0f, 0, 2.0f);
-
-        DrawIconShape(dl, center, radius, static_cast<uint8_t>(i));
-        ImGui::Dummy({ kIconSize, kIconSize });
-
-        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-            m_IconIndex = static_cast<uint8_t>(i);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", Safira::Icons::kLabels[i]);
-    }
-
+    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary * 0.7f),
+                       "Optional — a random colour is assigned if no image is chosen.");
     ImGui::Spacing();
 
     // ── Server address ───────────────────────────────────────────
@@ -409,7 +518,7 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::InputText("##address", &m_ServerIP);
     ImGui::SameLine();
 
-    // Connect button -- accent
+    // Connect button
     ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().AccentActive);
@@ -417,13 +526,6 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
 
     if (ImGui::Button("Connect", { 80, 0 })) {
-        // Load avatar image if path changed
-        if (!m_AvatarImagePath.empty() && !m_AvatarTexture) {
-            LoadAvatarImage(m_AvatarImagePath);
-        }
-
-        m_Color = Theme::Get().TextPrimary;  // default neutral color
-
         std::string addr = m_ServerIP;
         if (addr.rfind(':') == std::string::npos)
             addr += ":8192";
@@ -435,7 +537,7 @@ void ClientLayer::UI_ConnectionModal() {
 
     ImGui::Spacing();
 
-    // Quit button -- subtle
+    // Quit button
     ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().DeclineBtnActive);
@@ -447,20 +549,25 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(3);
 
-    // ── Connection status feedback ───────────────────────────────
+    // ── Connection status feedback / send packet on success ──────
     if (const auto status = m_Client->GetConnectionStatus();
         status == Safira::ConnectionStatus::Connected) {
+
+        // Send connection request with avatar data (no IconIndex)
         Safira::BufferWriter writer(m_ScratchBuffer);
         Safira::SerializePacket(writer, Safira::ConnectionRequestPacket{
-            m_Color, m_IconIndex, m_Username });
+            .Color      = 0,                // server will override with random
+            .Username   = m_Username,
+            .AvatarData = m_AvatarBytes,
+        });
         m_Client->Send(writer.Written());
         SaveConnectionDetails(m_ConnectionDetailsFilePath);
 
         // Set titlebar user info
         auto& app = Safira::ApplicationGUI::Get();
-        app.m_TitlebarUserName    = m_Username;
+        app.m_TitlebarUserName   = m_Username;
         app.m_TitlebarConnected  = true;
-        app.m_TitlebarAvatarTex   = m_AvatarTexture;
+        app.m_TitlebarAvatarTex  = m_AvatarTexture;
 
         ImGui::CloseCurrentPopup();
     } else if (status == Safira::ConnectionStatus::FailedToConnect) {
@@ -478,7 +585,108 @@ void ClientLayer::UI_ConnectionModal() {
 }
 
 // =========================================================================
-// UI_UserListSection -- RIGHT-CLICK context menu (replaces left-click invite)
+// UI_CropModal — square crop for non-square avatar images
+// =========================================================================
+
+void ClientLayer::UI_CropModal() {
+    if (m_ShowCropModal) {
+        ImGui::OpenPopup("Crop Avatar##CropModal");
+        m_ShowCropModal = false;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Get().BgPopupAlt);
+    ImGui::PushStyleColor(ImGuiCol_Border,   Theme::Get().ModalBorder);
+    ImGui::PushStyleColor(ImGuiCol_Text,     Theme::Get().TextPrimary);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+
+    bool open = true;
+    if (ImGui::BeginPopupModal("Crop Avatar##CropModal", &open,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+
+        ImFont* bold = SidebarBoldFont();
+        if (bold) ImGui::PushFont(bold);
+        ImGui::Text("Crop to Square");
+        if (bold) ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Draw interactive crop widget
+        m_CropRect = Safira::DrawCropWidget(
+            m_CropPreviewTex, m_CropSrcWidth, m_CropSrcHeight,
+            m_CropRect, 300.0f);
+
+        ImGui::Spacing();
+
+        // Apply button
+        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().AccentActive);
+        ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+
+        if (ImGui::Button("Apply Crop", { 120, 0 })) {
+            auto rgba = Safira::ProcessAvatarImage(m_AvatarImagePath, m_CropRect);
+            if (rgba) {
+                m_AvatarBytes = std::move(*rgba);
+
+                // Create display texture from cropped + resized pixels
+                auto raw = Safira::LoadImageFromFile(m_AvatarImagePath);
+                if (raw.Valid()) {
+                    auto cropped = Safira::CropSquare(raw, m_CropRect);
+                    auto resized = Safira::ResizeSquare(cropped.data(), m_CropRect.Size,
+                                                        Safira::kAvatarPixelSize);
+                    m_AvatarImage = std::make_shared<Safira::Image>(
+                        Safira::kAvatarPixelSize, Safira::kAvatarPixelSize,
+                        Safira::ImageFormat::RGBA, resized.data());
+                    m_AvatarTexture = (ImTextureID)m_AvatarImage->GetDescriptorSet();
+                }
+                spdlog::info("Avatar cropped and processed ({} bytes raw RGBA)",
+                             m_AvatarBytes.size());
+            } else {
+                spdlog::warn("Avatar crop/compress failed");
+            }
+
+            // Clean up crop preview
+            m_CropPreviewImage = nullptr;
+            m_CropPreviewTex   = {};
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+
+        ImGui::SameLine();
+
+        // Cancel
+        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+
+        if (ImGui::Button("Cancel", { 80, 0 })) {
+            m_CropPreviewImage = nullptr;
+            m_CropPreviewTex   = {};
+            m_AvatarImagePath.clear();
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+
+        ImGui::EndPopup();
+    }
+
+    if (!open) {
+        // User closed via X
+        m_CropPreviewImage = nullptr;
+        m_CropPreviewTex   = {};
+    }
+
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+}
+
+// =========================================================================
+// UI_UserListSection — avatar images or coloured-letter circles
 // =========================================================================
 
 void ClientLayer::UI_UserListSection(float) {
@@ -498,13 +706,21 @@ void ClientLayer::UI_UserListSection(float) {
         if (username.empty()) continue;
 
         const bool isOurs = (username == m_Username);
-        constexpr float itemPad = 14.0f;   // same as conversation list pad
+        constexpr float itemPad = 14.0f;
         ImGui::SetCursorPosX(itemPad);
         const ImVec2 pos    = ImGui::GetCursorScreenPos();
         const float  radius = kIconSize * 0.45f;
         const ImVec2 center = { pos.x + kIconSize * 0.5f, pos.y + kIconSize * 0.5f };
 
-        DrawIconShape(dl, center, radius, info.IconIndex);
+        // Resolve avatar texture: own or peer
+        ImTextureID tex = {};
+        if (isOurs && m_AvatarTexture) {
+            tex = m_AvatarTexture;
+        } else if (auto it = m_PeerAvatars.find(username); it != m_PeerAvatars.end()) {
+            tex = it->second.Tex;
+        }
+
+        DrawAvatarCircle(dl, center, radius, info.Color, username, tex);
         ImGui::Dummy({ kIconSize, kIconSize });
 
         // Right-click context menu on the icon (not left-click)
@@ -515,16 +731,14 @@ void ClientLayer::UI_UserListSection(float) {
                 ImGui::OpenPopup(popupId.c_str());
             }
 
-            // Themed context menu
-            ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Get().BgPopupAlt);
+            ImGui::PushStyleColor(ImGuiCol_PopupBg,      Theme::Get().BgPopupAlt);
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Theme::Get().BgFrameHovered);
-            ImGui::PushStyleColor(ImGuiCol_Text, Theme::Get().TextPrimary);
+            ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().TextPrimary);
             ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6.0f);
 
             if (ImGui::BeginPopup(popupId.c_str())) {
-                // Option 1: Invite to private chat
-                const bool alreadyInChat = m_PrivateChats.contains(username);
-                const bool alreadyInvited = m_PendingOutgoingInvites.contains(username);
+                const bool alreadyInChat   = m_PrivateChats.contains(username);
+                const bool alreadyInvited  = m_PendingOutgoingInvites.contains(username);
 
                 if (alreadyInChat) {
                     ImGui::TextDisabled("Already in private chat");
@@ -542,7 +756,6 @@ void ClientLayer::UI_UserListSection(float) {
 
                 ImGui::Separator();
 
-                // Option 2: Report user
                 if (ImGui::Selectable("Report user to server")) {
                     m_ReportTarget = username;
                     m_ReportReasonBuf[0] = '\0';
@@ -572,7 +785,7 @@ void ClientLayer::UI_UserListSection(float) {
 }
 
 // =========================================================================
-// UI_ReportModal -- modal dialog for reporting a user with a reason
+// UI_ReportModal
 // =========================================================================
 
 void ClientLayer::UI_ReportModal() {
@@ -581,11 +794,10 @@ void ClientLayer::UI_ReportModal() {
         m_ReportModalOpen = false;
     }
 
-    // Themed styling
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,      Theme::Get().BgPopupAlt);
-    ImGui::PushStyleColor(ImGuiCol_Border,        Theme::Get().ModalBorder);
-    ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().TextPrimary);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,       Theme::Get().BgFrame);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Get().BgPopupAlt);
+    ImGui::PushStyleColor(ImGuiCol_Border,   Theme::Get().ModalBorder);
+    ImGui::PushStyleColor(ImGuiCol_Text,     Theme::Get().TextPrimary);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,  Theme::Get().BgFrame);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
 
     bool open = true;
@@ -603,7 +815,6 @@ void ClientLayer::UI_ReportModal() {
 
         ImGui::Spacing();
 
-        // Submit button (accent)
         ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().AccentActive);
@@ -613,7 +824,6 @@ void ClientLayer::UI_ReportModal() {
         if (ImGui::Button("Submit Report", { 130, 0 })) {
             std::string reason(m_ReportReasonBuf);
             if (!reason.empty()) {
-                // Send report as a special message to server
                 std::string reportMsg = std::format(
                     "/report {} {}", m_ReportTarget, reason);
                 Safira::BufferWriter writer(m_ScratchBuffer);
@@ -632,7 +842,6 @@ void ClientLayer::UI_ReportModal() {
 
         ImGui::SameLine();
 
-        // Cancel button
         ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
@@ -652,7 +861,7 @@ void ClientLayer::UI_ReportModal() {
 }
 
 // =========================================================================
-// UI_IncomingInvites (unchanged)
+// UI_IncomingInvites
 // =========================================================================
 
 void ClientLayer::UI_IncomingInvites() {
@@ -663,7 +872,6 @@ void ClientLayer::UI_IncomingInvites() {
 
     ImGui::OpenPopup(popupId.c_str());
 
-    // Themed invite popup
     ImGui::PushStyleColor(ImGuiCol_PopupBg, Theme::Get().BgPopupAlt);
     ImGui::PushStyleColor(ImGuiCol_Text,    Theme::Get().TextPrimary);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
@@ -674,14 +882,12 @@ void ClientLayer::UI_IncomingInvites() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Center the two buttons
         constexpr float btnW = 120.0f;
         constexpr float btnGap = 8.0f;
         const float totalW = btnW * 2.0f + btnGap;
         const float availW = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - totalW) * 0.5f);
 
-        // Accept (accent)
         ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
         ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
@@ -698,7 +904,6 @@ void ClientLayer::UI_IncomingInvites() {
 
         ImGui::SameLine(0, btnGap);
 
-        // Decline
         ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
@@ -725,7 +930,7 @@ void ClientLayer::UI_IncomingInvites() {
 }
 
 // =========================================================================
-// UI_UnifiedChatWindow -- with private mode, leave callback, peer header
+// UI_UnifiedChatWindow
 // =========================================================================
 
 void ClientLayer::UI_UnifiedChatWindow() {
@@ -813,49 +1018,38 @@ void ClientLayer::UI_UnifiedChatWindow() {
                 m_ActiveConvoIdx = i;
 
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            constexpr float kR = 14.0f;
-            const float tx = cursor.x + pad;
+            constexpr float kR   = 14.0f;
+            constexpr float kPad = 14.0f;
+            const float tx = cursor.x + kPad;
             const float ax = tx + kR;
             const float ay = cursor.y + itemSz.y * 0.5f;
-            char letter = c.Title.empty()
-                ? '?'
-                : static_cast<char>(toupper(c.Title[0]));
-            char buf[2] = { letter, '\0' };
 
-            ImU32 avatarCol = Theme::Get().Accent;
-            if (i == 0)
+            // Resolve avatar colour for fallback circle
+            uint32_t avatarCol = Theme::Get().Accent;
+            if (i == 0) {
                 avatarCol = Theme::Get().LobbyAvatar;
-
-            // Use conversation avatar texture if available
-            if (c.AvatarTex) {
-                dl->AddImageRounded(c.AvatarTex,
-                    { ax - kR, ay - kR }, { ax + kR, ay + kR },
-                    { 0, 0 }, { 1, 1 },
-                    Theme::Get().AvatarImageTint, kR);
             } else {
-                dl->AddCircleFilled({ ax, ay }, kR, avatarCol, 24);
-                ImVec2 lsz = SidebarMeasureText(bold, buf);
-                if (bold) ImGui::PushFont(bold);
-                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                            { ax - lsz.x * 0.5f, ay - lsz.y * 0.5f },
-                            Theme::Get().AvatarLetterCol, buf);
-                if (bold) ImGui::PopFont();
+                // Private chat peer — use their server-assigned colour
+                const auto& title = c.Title;
+                if (auto it = m_ConnectedClients.find(title);
+                    it != m_ConnectedClients.end())
+                    avatarCol = it->second.Color;
             }
 
-            const float textX = tx + kR * 2.0f + 10.0f;
-            const float rightEdge = cursor.x + sideW - pad - 4.0f;
+            DrawAvatarCircle(dl, { ax, ay }, kR, avatarCol, c.Title, c.AvatarTex);
 
-            // Title — truncate accounting for time label on the right
+            const float textX = tx + kR * 2.0f + 10.0f;
+            const float rightEdge = cursor.x + sideW - kPad - 4.0f;
+
             float titleMaxW = rightEdge - textX;
             if (!c.TimeLabel.empty()) {
                 ImVec2 tSz = ImGui::CalcTextSize(c.TimeLabel.c_str());
-                titleMaxW -= (tSz.x + 8.0f);  // gap before time label
+                titleMaxW -= (tSz.x + 8.0f);
             }
             SidebarDrawTextTruncated(bold, { textX, cursor.y + 8.0f },
                               Theme::Get().ConvoTitleCol,
                               c.Title.c_str(), titleMaxW);
 
-            // Preview — truncate to available width
             const float previewMaxW = rightEdge - textX;
             SidebarDrawTextTruncated(body, { textX, cursor.y + 28.0f },
                               Theme::Get().ConvoPreviewCol,
@@ -864,7 +1058,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
             if (!c.TimeLabel.empty()) {
                 ImVec2 tSz = ImGui::CalcTextSize(c.TimeLabel.c_str());
                 dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                    { cursor.x + sideW - pad - tSz.x - 4.0f,
+                    { cursor.x + sideW - kPad - tSz.x - 4.0f,
                       cursor.y + 10.0f },
                     Theme::Get().ConvoTimeCol,
                     c.TimeLabel.c_str());
@@ -878,9 +1072,9 @@ void ClientLayer::UI_UnifiedChatWindow() {
     }
     ImGui::EndChild(); // Sidebar
 
-    // Draw vertical separator on top of sidebar's right edge
+    // Vertical separator
     {
-        ImDrawList* dl = ImGui::GetWindowDrawList();  // ##ChatPanel's draw list
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 sidebarEnd = ImGui::GetCursorScreenPos();
         float panelTop = sidebarEnd.y - avail.y;
         dl->AddLine({ sidebarEnd.x, panelTop },
@@ -929,19 +1123,21 @@ void ClientLayer::UI_UnifiedChatWindow() {
             }
         }
 
-        // ── Configure ChatPanel for this conversation ──────────────
         m_ChatPanel.StatusProtocol = (m_ActiveConvoIdx == 0)
             ? "DTLS 1.3 | ML-KEM-512"
             : "TLS 1.3 | X25519/ML-KEM-768";
 
-        // Private mode: hide author names, show peer avatar + leave button
         m_ChatPanel.SetPrivateChatMode(isPrivate);
 
         if (isPrivate) {
             m_ChatPanel.SetOwnAvatar(m_AvatarTexture);
-            m_ChatPanel.SetPeerAvatar(ImTextureID{}); // peer avatar not available locally
 
-            // Set leave callback for this specific peer
+            // Set peer avatar from cache
+            ImTextureID peerTex = {};
+            if (auto it = m_PeerAvatars.find(peerName); it != m_PeerAvatars.end())
+                peerTex = it->second.Tex;
+            m_ChatPanel.SetPeerAvatar(peerTex);
+
             m_ChatPanel.SetOnLeaveCallback([this, peerName]() {
                 LeavePrivateChat(peerName);
             });
@@ -951,13 +1147,11 @@ void ClientLayer::UI_UnifiedChatWindow() {
             m_ChatPanel.SetOnLeaveCallback(nullptr);
         }
 
-        // Match left/top padding with sidebar "Online" header
         ImGui::SetCursorPos({ 14.0f, 8.0f });
 
         m_ChatPanel.RenderChatArea(convo, m_Username, title,
                                    connected, handshaking);
 
-        // Handle outbound messages
         if (auto msg = m_ChatPanel.ConsumePendingMessage()) {
             if (m_ActiveConvoIdx == 0) {
                 SendChatMessage(*msg);
@@ -974,7 +1168,6 @@ void ClientLayer::UI_UnifiedChatWindow() {
             }
         }
     } else {
-        // Empty state
         const char* sub = "Select a conversation or start a new one.";
         ImVec2 sSz = ImGui::CalcTextSize(sub);
         ImGui::SetCursorPos({ (chatW - sSz.x) * 0.5f, avail.y * 0.45f });
@@ -984,10 +1177,7 @@ void ClientLayer::UI_UnifiedChatWindow() {
     ImGui::EndChild(); // ChatArea
     ImGui::PopStyleColor();
 
-    // ── Separator lines ─────────────────────────────────────────────────
-    // Draw using a transparent overlay window so lines sit ON TOP of child
-    // windows but BELOW tooltips (unlike GetForegroundDrawList which covers
-    // everything).
+    // ── Separator overlay ───────────────────────────────────────────────
     const bool anyModalOpen = !IsConnected()
         || !m_IncomingInvites.empty()
         || ImGui::IsPopupOpen("Report User##ReportModal");
@@ -1010,12 +1200,8 @@ void ClientLayer::UI_UnifiedChatWindow() {
 
         if (ImGui::Begin("##SeparatorOverlay", nullptr, lineFlags)) {
             ImDrawList* dl = ImGui::GetWindowDrawList();
-
-            // Horizontal line at top
             dl->AddLine(origin, { origin.x + avail.x, origin.y },
                         lineCol, 1.0f);
-
-            // Vertical line between sidebar and chat area
             dl->AddLine({ origin.x + sideW, origin.y },
                         { origin.x + sideW, origin.y + avail.y },
                         lineCol, 1.0f);
@@ -1039,7 +1225,6 @@ void ClientLayer::OnConnected() {
         m_LobbyMessages.clear();
     }
 
-    // Update titlebar status
     auto& app = Safira::ApplicationGUI::Get();
     app.m_TitlebarConnected = true;
 }
@@ -1051,13 +1236,12 @@ void ClientLayer::OnDisconnected() {
     m_IncomingInvites.clear();
     m_PendingOutgoingInvites.clear();
 
-    // Update titlebar status
     auto& app = Safira::ApplicationGUI::Get();
     app.m_TitlebarConnected = false;
 }
 
 // =========================================================================
-// OnDataReceived -- TIMESTAMP FIX: all messages get time at creation
+// OnDataReceived — caches peer avatar textures from ClientListPacket
 // =========================================================================
 
 void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
@@ -1098,19 +1282,39 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
         },
         [&](const Safira::ClientListPacket& pkt) {
             m_ConnectedClients.clear();
-            for (const auto& u : pkt.Clients)
+            for (const auto& u : pkt.Clients) {
                 m_ConnectedClients[u.Username] = u;
+
+                // Update own colour from server assignment
+                if (u.Username == m_Username)
+                    m_Color = u.Color;
+
+                // Cache peer avatar textures (skip self — we have our own)
+                if (u.Username != m_Username)
+                    UploadPeerAvatarTexture(u.Username, u.AvatarData);
+            }
+
+            // Remove stale peer avatars for users no longer in the list
+            std::erase_if(m_PeerAvatars, [&](const auto& pair) {
+                return !m_ConnectedClients.contains(pair.first);
+            });
         },
         [&](const Safira::ClientConnectPacket& pkt) {
             m_Console.AddItalicMessageWithColor(pkt.Client.Color,
                                                 "Welcome {}!", pkt.Client.Username);
             m_ConnectedClients[pkt.Client.Username] = pkt.Client;
+
+            // Cache their avatar
+            if (pkt.Client.Username != m_Username)
+                UploadPeerAvatarTexture(pkt.Client.Username, pkt.Client.AvatarData);
+
             AddLobbyMessage("System",
                 std::format("Welcome {}!", pkt.Client.Username),
                 Theme::Get().TextSystem, Safira::MessageRole::System);
         },
         [&](const Safira::ClientDisconnectPacket& pkt) {
             m_ConnectedClients.erase(pkt.Client.Username);
+            m_PeerAvatars.erase(pkt.Client.Username);
             m_PrivateChats.erase(pkt.Client.Username);
             m_PendingOutgoingInvites.erase(pkt.Client.Username);
             m_Console.AddItalicMessageWithColor(pkt.Client.Color,
@@ -1130,8 +1334,6 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
                     ? Safira::MessageRole::Own
                     : Safira::MessageRole::Peer;
                 AddLobbyMessage(m.Username, m.Message, col, role);
-                // Note: history messages get current time since server
-                // doesn't transmit original timestamps
             }
             if (m_ShowSuccessfulConnectionMessage) {
                 m_ShowSuccessfulConnectionMessage = false;
@@ -1230,7 +1432,7 @@ void ClientLayer::StartPrivateChatAsInitiator(const std::string& peerUsername,
 }
 
 // =========================================================================
-// Chat / persistence -- COLOR REMOVED, AVATAR PATH ADDED
+// Chat send
 // =========================================================================
 
 void ClientLayer::SendChatMessage(std::string_view message) {
@@ -1249,7 +1451,7 @@ void ClientLayer::SendChatMessage(std::string_view message) {
 
         if (!app.m_UserManualAway)
             app.m_LastActivityTime = std::chrono::steady_clock::now();
-        return;  // don't send /afk to server
+        return;
     }
 
     Safira::BufferWriter writer(m_ScratchBuffer);
@@ -1261,12 +1463,15 @@ void ClientLayer::SendChatMessage(std::string_view message) {
                     Safira::MessageRole::Own);
 }
 
+// =========================================================================
+// Persistence — IconIndex removed, AvatarImagePath kept
+// =========================================================================
+
 void ClientLayer::SaveConnectionDetails(const std::filesystem::path& filepath) {
     YAML::Emitter out;
     out << YAML::BeginMap
         << YAML::Key << "ConnectionDetails" << YAML::Value << YAML::BeginMap
             << YAML::Key << "Username"        << YAML::Value << m_Username
-            << YAML::Key << "IconIndex"       << YAML::Value << static_cast<int>(m_IconIndex)
             << YAML::Key << "ServerIP"        << YAML::Value << m_ServerIP
             << YAML::Key << "AvatarImagePath" << YAML::Value << m_AvatarImagePath
         << YAML::EndMap
@@ -1290,12 +1495,10 @@ bool ClientLayer::LoadConnectionDetails(const std::filesystem::path& filepath) {
     auto root = data["ConnectionDetails"];
     if (!root) return false;
 
-    m_Username  = root["Username"].as<std::string>("");
-    m_ServerIP  = root["ServerIP"].as<std::string>("127.0.0.1");
-    m_IconIndex = static_cast<uint8_t>(root["IconIndex"].as<int>(0));
-    m_Color     = Theme::Get().TextPrimary;  // default neutral
+    m_Username = root["Username"].as<std::string>("");
+    m_ServerIP = root["ServerIP"].as<std::string>("127.0.0.1");
 
-    // Load avatar image path and attempt to load image
+    // Load avatar image path and attempt to load + process image
     m_AvatarImagePath = root["AvatarImagePath"].as<std::string>("");
     if (!m_AvatarImagePath.empty()) {
         LoadAvatarImage(m_AvatarImagePath);
