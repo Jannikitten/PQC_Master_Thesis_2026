@@ -1,5 +1,4 @@
 #include "ServerLayer.h"
-#include "ServerPacket.h"
 #include "SafiraAssert.h"
 #include "StringUtils.h"
 
@@ -10,25 +9,56 @@
 // §3.4   Strong types     – ClientID is a struct, printed via .Value
 // §5.3   Serialization    – BufferWriter + SerializePacket (concept-based)
 // C++23                   – ranges, string_view, structured bindings, std::visit
+//
+// ── New in v2 ────────────────────────────────────────────────────────────────
+//  - Rate limiting         – per-client message burst tracking, auto-kick
+//  - Mute system           – /mute, /unmute commands
+//  - Expanded commands     – /list, /stats, /broadcast, /motd, /mute, /unmute
+//  - Username validation   – length, character, and reserved-name checks
+//  - Flood protection      – auto-kick after sustained spam
+//  - MOTD                  – sent to each new client on connect
+//
+// Types from the Safira library:
+//  ChatMessage             (UserInfo.h)    — username + message pair
+//  MaxMessageLength        (UserInfo.h)    — wire-format message cap (4096)
+//  IsValidMessage()        (ServerPacket.h)— whitespace / length check
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <print>
 #include <ranges>
 
 #include <spdlog/spdlog.h>
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Application-level constants
+//
+// MaxMessageLength (4096) from UserInfo.h is the wire-format hard cap —
+// IsValidMessage() already truncates to it.  The constants below are
+// server-policy tunables layered on top.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr size_t kMinUsernameLength   = 2;
+static constexpr size_t kMaxUsernameLength   = 24;
+static constexpr int    kRateLimitMessages   = 10;     // messages per window
+static constexpr float  kRateLimitWindowSec  = 5.0f;   // sliding window
+static constexpr int    kFloodKickThreshold  = 3;      // violations before auto-kick
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Lifecycle
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ServerLayer::OnAttach() {
-    constexpr uint16_t Port = 8192;
     m_ScratchBuffer.resize(8192);
 
-    m_Server = std::make_unique<Safira::Server>(Port);
+    Safira::ServerConfig config;
+    config.Port                    = 8192;
+    config.MaxClients              = 64;
+    config.HandshakeTimeoutSeconds = 10.0f;
+
+    m_Server = std::make_unique<Safira::Server>(config);
 
     m_Server->OnClientConnected(
         [this](Safira::ClientInfo& c) { OnClientConnected(c); });
@@ -45,11 +75,13 @@ void ServerLayer::OnAttach() {
     for (const auto& msg : m_MessageHistory)
         m_Console.AddTaggedMessage(msg.Username, msg.Message);
 
-    m_Console.AddTaggedMessage("Info", "Started server on port {}", Port);
+    m_Console.AddTaggedMessage("Info", "Started server on port {} (max {} clients)",
+                               config.Port, config.MaxClients);
     m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
 }
 
 void ServerLayer::OnDetach() {
+    SendServerShutdownToAllClients();
     m_Server->Stop();
 }
 
@@ -83,6 +115,10 @@ void ServerLayer::OnClientDisconnected(Safira::ClientInfo& clientInfo) {
 
     CleanupPendingInvites(clientInfo.ID, username);
 
+    // Clean up per-client state
+    m_RateLimitState.erase(clientInfo.ID);
+    m_MutedUsers.erase(username);
+
     SendClientDisconnect(clientInfo);
     m_Console.AddItalicMessage("Client {} disconnected", username);
     m_ConnectedClients.erase(clientInfo.ID);
@@ -101,10 +137,44 @@ void ServerLayer::CleanupPendingInvites(Safira::ClientID disconnectedID,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// OnDataReceived — variant dispatch via std::visit
+// Rate limiting
 //
-// §3.4  Typestate  – compile-time exhaustive via Overloaded visitor
-// §5.3  Serialization – DeserializeServerPacket returns expected<variant>
+// Sliding-window approach: track timestamps of recent messages per client.
+// If a client exceeds kRateLimitMessages within kRateLimitWindowSec, the
+// message is silently dropped and a violation counter increments.  After
+// kFloodKickThreshold violations the client is auto-kicked.
+// ═════════════════════════════════════════════════════════════════════════════
+
+bool ServerLayer::IsRateLimited(Safira::ClientID id) {
+    auto& state = m_RateLimitState[id];
+    const auto now = std::chrono::steady_clock::now();
+    const auto window = std::chrono::duration<float>(kRateLimitWindowSec);
+
+    // Purge timestamps outside the window
+    std::erase_if(state.Timestamps, [&](auto& tp) { return (now - tp) > window; });
+
+    if (static_cast<int>(state.Timestamps.size()) >= kRateLimitMessages) {
+        state.Violations++;
+
+        if (state.Violations >= kFloodKickThreshold) {
+            const auto& username = GetClientUsername(id);
+            m_Console.AddItalicMessage("Auto-kicking {} for flooding ({} violations)",
+                                       username, state.Violations);
+
+            Safira::ClientInfo info;
+            info.ID = id;
+            SendClientKick(info, "Flood protection: message rate exceeded");
+            m_Server->KickClient(id);
+        }
+        return true;
+    }
+
+    state.Timestamps.push_back(now);
+    return false;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// OnDataReceived — variant dispatch via std::visit
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
@@ -124,17 +194,38 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
                                     clientInfo.ID.Value, clientInfo.AddressStr);
                 return;
             }
-            std::string message = pkt.Message;
-            if (Safira::IsValidMessage(message)) {
-                const auto& client = m_ConnectedClients.at(clientInfo.ID);
-                m_MessageHistory.emplace_back(client.Username, message);
-                m_Console.AddTaggedMessageWithColor(
-                    client.Color | 0xFF000000, client.Username, message);
-                SendMessageToAllClients(clientInfo, message);
+
+            const auto& client = m_ConnectedClients.at(clientInfo.ID);
+
+            // ── Mute check ──────────────────────────────────────────────
+            if (m_MutedUsers.contains(client.Username)) {
+                spdlog::debug("dropped message from muted user {}", client.Username);
+                return;
             }
+
+            // ── Rate-limit check ────────────────────────────────────────
+            if (IsRateLimited(clientInfo.ID)) {
+                spdlog::debug("rate-limited message from {}", client.Username);
+                return;
+            }
+
+            // ── Message validation ──────────────────────────────────────
+            // IsValidMessage (ServerPacket.h) checks whitespace-only and
+            // truncates to MaxMessageLength (UserInfo.h, 4096).
+            std::string message = pkt.Message;
+            if (!Safira::IsValidMessage(message))
+                return;
+
+            m_MessageHistory.emplace_back(client.Username, message);
+            m_Console.AddTaggedMessageWithColor(
+                client.Color | 0xFF000000, client.Username, message);
+            SendMessageToAllClients(clientInfo, message);
         },
+
         [&](const Safira::ConnectionRequestPacket& pkt) {
-            const bool isValid = IsValidUsername(pkt.Username);
+            const auto validation = ValidateUsername(pkt.Username);
+            const bool isValid = !validation.has_value();
+
             SendClientConnectionRequestResponse(clientInfo, isValid);
 
             if (isValid) {
@@ -148,11 +239,20 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
                 SendClientConnect(clientInfo);
                 SendClientList(clientInfo);
                 SendMessageHistory(clientInfo);
+
+                // Send MOTD if set
+                if (!m_Motd.empty()) {
+                    Safira::BufferWriter writer(m_ScratchBuffer);
+                    Safira::SerializePacket(writer, Safira::ServerMessagePacket{
+                        "SERVER", m_Motd });
+                    m_Server->SendToClient(clientInfo.ID, writer.Written());
+                }
             } else {
-                m_Console.AddMessage("Connection rejected: username='{}' addr={}",
-                                    pkt.Username, clientInfo.AddressStr);
+                m_Console.AddMessage("Connection rejected: '{}' — {} (addr={})",
+                                    pkt.Username, *validation, clientInfo.AddressStr);
             }
         },
+
         [&](const Safira::PrivateChatInvitePacket& pkt) {
             if (!m_ConnectedClients.contains(clientInfo.ID)) return;
             const auto& fromUsername = m_ConnectedClients.at(clientInfo.ID).Username;
@@ -168,6 +268,7 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
             m_Console.AddMessage("{} invited {} to a private chat",
                                 fromUsername, pkt.Username);
         },
+
         [&](const Safira::PrivateChatResponsePacket& pkt) {
             if (!m_ConnectedClients.contains(clientInfo.ID)) return;
             const auto& responderUsername = m_ConnectedClients.at(clientInfo.ID).Username;
@@ -196,7 +297,7 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Private chat forwarding — BufferWriter + SerializePacket
+// Private chat forwarding
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ServerLayer::ForwardPrivateChatInvite(Safira::ClientID targetID,
@@ -223,7 +324,7 @@ void ServerLayer::ForwardPrivateChatDeclined(Safira::ClientID initiatorID,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Send helpers — BufferWriter + SerializePacket
+// Send helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
 void ServerLayer::SendClientList(const Safira::ClientInfo& clientInfo) {
@@ -334,10 +435,18 @@ void ServerLayer::OnCommand(std::string_view command) {
 
     auto commandStr = command.substr(1);
     auto tokens = Safira::Utils::SplitString(commandStr, ' ');
+    if (tokens.empty()) return;
 
-    if (tokens[0] == "kick") {
-        if (tokens.size() == 2 || tokens.size() == 3) {
-            std::string reason = tokens.size() == 3 ? std::string(tokens[2]) : "";
+    const auto& cmd = tokens[0];
+
+    // ── /kick <username> [reason] ───────────────────────────────────────
+    if (cmd == "kick") {
+        if (tokens.size() >= 2) {
+            std::string reason;
+            for (size_t i = 2; i < tokens.size(); ++i) {
+                if (!reason.empty()) reason += ' ';
+                reason += std::string(tokens[i]);
+            }
             if (KickUser(tokens[1], reason)) {
                 m_Console.AddItalicMessage("User {} has been kicked.", tokens[1]);
                 if (!reason.empty())
@@ -349,16 +458,163 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Console.AddItalicMessage("Usage: /kick <username> [reason]");
         }
     }
+    // ── /list — show connected users ────────────────────────────────────
+    else if (cmd == "list") {
+        m_Console.AddItalicMessage("Connected clients ({}/{}):",
+                                   m_ConnectedClients.size(),
+                                   m_Server->GetConfig().MaxClients);
+        for (const auto& [id, info] : m_ConnectedClients) {
+            auto metrics = m_Server->GetClientMetrics(id);
+            if (metrics) {
+                m_Console.AddItalicMessage("  {} — uptime {:.0f}s, {} msgs",
+                                           info.Username,
+                                           metrics->UptimeSeconds(),
+                                           metrics->MessagesRecv);
+            } else {
+                m_Console.AddItalicMessage("  {}", info.Username);
+            }
+        }
+    }
+    // ── /stats — server-wide statistics ─────────────────────────────────
+    else if (cmd == "stats") {
+        uint64_t totalMsgs = 0;
+        uint64_t totalBytesIn = 0;
+        uint64_t totalBytesOut = 0;
+
+        for (const auto& [id, _] : m_ConnectedClients) {
+            if (auto m = m_Server->GetClientMetrics(id)) {
+                totalMsgs     += m->MessagesRecv;
+                totalBytesIn  += m->BytesRecv;
+                totalBytesOut += m->BytesSent;
+            }
+        }
+
+        m_Console.AddItalicMessage("Server stats:");
+        m_Console.AddItalicMessage("  Clients:  {}/{}",
+                                   m_ConnectedClients.size(),
+                                   m_Server->GetConfig().MaxClients);
+        m_Console.AddItalicMessage("  Messages: {} total ({} in history)",
+                                   totalMsgs, m_MessageHistory.size());
+        m_Console.AddItalicMessage("  Traffic:  {} KB in, {} KB out",
+                                   totalBytesIn / 1024, totalBytesOut / 1024);
+        m_Console.AddItalicMessage("  Muted:    {}", m_MutedUsers.size());
+    }
+    // ── /broadcast <message> — server announcement ──────────────────────
+    else if (cmd == "broadcast") {
+        if (tokens.size() >= 2) {
+            std::string msg;
+            for (size_t i = 1; i < tokens.size(); ++i) {
+                if (!msg.empty()) msg += ' ';
+                msg += std::string(tokens[i]);
+            }
+
+            Safira::BufferWriter writer(m_ScratchBuffer);
+            Safira::SerializePacket(writer, Safira::ServerMessagePacket{
+                "SERVER", msg });
+            m_Server->SendToAllClients(writer.Written());
+            m_Console.AddTaggedMessage("BROADCAST", msg);
+        } else {
+            m_Console.AddItalicMessage("Usage: /broadcast <message>");
+        }
+    }
+    // ── /motd [message] — set or clear the message of the day ───────────
+    else if (cmd == "motd") {
+        if (tokens.size() >= 2) {
+            m_Motd.clear();
+            for (size_t i = 1; i < tokens.size(); ++i) {
+                if (!m_Motd.empty()) m_Motd += ' ';
+                m_Motd += std::string(tokens[i]);
+            }
+            m_Console.AddItalicMessage("MOTD set: {}", m_Motd);
+        } else {
+            m_Motd.clear();
+            m_Console.AddItalicMessage("MOTD cleared.");
+        }
+    }
+    // ── /mute <username> ────────────────────────────────────────────────
+    else if (cmd == "mute") {
+        if (tokens.size() == 2) {
+            auto target = std::string(tokens[1]);
+            if (FindClientID(target)) {
+                m_MutedUsers.insert(target);
+                m_Console.AddItalicMessage("User {} is now muted.", target);
+            } else {
+                m_Console.AddItalicMessage("User {} not found.", target);
+            }
+        } else {
+            m_Console.AddItalicMessage("Usage: /mute <username>");
+        }
+    }
+    // ── /unmute <username> ──────────────────────────────────────────────
+    else if (cmd == "unmute") {
+        if (tokens.size() == 2) {
+            auto target = std::string(tokens[1]);
+            if (m_MutedUsers.erase(target))
+                m_Console.AddItalicMessage("User {} is now unmuted.", target);
+            else
+                m_Console.AddItalicMessage("User {} was not muted.", target);
+        } else {
+            m_Console.AddItalicMessage("Usage: /unmute <username>");
+        }
+    }
+    // ── /help ───────────────────────────────────────────────────────────
+    else if (cmd == "help") {
+        m_Console.AddItalicMessage("Available commands:");
+        m_Console.AddItalicMessage("  /kick <user> [reason]  — disconnect a user");
+        m_Console.AddItalicMessage("  /mute <user>           — silence a user");
+        m_Console.AddItalicMessage("  /unmute <user>         — restore a user's voice");
+        m_Console.AddItalicMessage("  /list                  — show connected clients");
+        m_Console.AddItalicMessage("  /stats                 — server statistics");
+        m_Console.AddItalicMessage("  /broadcast <msg>       — send server announcement");
+        m_Console.AddItalicMessage("  /motd [msg]            — set/clear message of the day");
+        m_Console.AddItalicMessage("  /help                  — this message");
+    }
+    // ── Unknown ─────────────────────────────────────────────────────────
+    else {
+        m_Console.AddItalicMessage("Unknown command: /{}. Type /help for a list.", cmd);
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Helpers
+// Username validation
+//
+// Returns std::nullopt if valid, or a human-readable rejection reason.
+// Replaces the old bool-only IsValidUsername with richer feedback.
 // ═════════════════════════════════════════════════════════════════════════════
 
-bool ServerLayer::IsValidUsername(const std::string& username) const {
-    return std::ranges::none_of(
+std::optional<std::string> ServerLayer::ValidateUsername(const std::string& username) const {
+    if (username.size() < kMinUsernameLength)
+        return std::format("too short (min {} chars)", kMinUsernameLength);
+    if (username.size() > kMaxUsernameLength)
+        return std::format("too long (max {} chars)", kMaxUsernameLength);
+
+    // Character whitelist: alphanumeric, underscore, hyphen, period
+    auto isAllowedChar = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c))
+            || c == '_' || c == '-' || c == '.';
+    };
+    if (!std::ranges::all_of(username, isAllowedChar))
+        return "contains invalid characters (allowed: a-z, 0-9, _ - .)";
+
+    // Reserved names
+    static constexpr std::array kReservedNames = {
+        "SERVER", "SYSTEM", "Admin", "admin", "server", "system",
+    };
+    if (std::ranges::find(kReservedNames, username) != kReservedNames.end())
+        return "reserved name";
+
+    // Uniqueness
+    const bool taken = std::ranges::any_of(
         m_ConnectedClients | std::views::values,
         [&](const Safira::UserInfo& info) { return info.Username == username; });
+    if (taken)
+        return "already taken";
+
+    return std::nullopt;
+}
+
+bool ServerLayer::IsValidUsername(const std::string& username) const {
+    return !ValidateUsername(username).has_value();
 }
 
 const std::string& ServerLayer::GetClientUsername(Safira::ClientID id) const {

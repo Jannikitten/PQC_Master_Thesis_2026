@@ -1,91 +1,124 @@
-#ifndef PQC_MASTER_THESIS_2026_SERVERLAYER_H
-#define PQC_MASTER_THESIS_2026_SERVERLAYER_H
+#ifndef PQC_MASTER_THESIS_2026_SERVER_LAYER_H
+#define PQC_MASTER_THESIS_2026_SERVER_LAYER_H
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ServerLayer.h — application layer sitting above Server
+// ServerLayer.h — application-level server logic
 //
-//  §3.2  Result types    – FindClientID returns std::optional<ClientID>
-//  §3.4  Strong types    – ClientID is a struct; no implicit int comparisons
-//  §5.3  Serialization   – BufferWriter + SerializePacket (concept-based)
-//  C++23                 – ranges, string_view, structured bindings, std::visit
+// Sits above the DTLS transport (Server.h) and implements:
+//   - User registration and validation
+//   - Chat message relay + history persistence (YAML)
+//   - Private chat invite / accept / decline brokering
+//   - Admin commands (/kick, /mute, /list, /stats, /broadcast, /motd, /help)
+//   - Rate limiting and flood protection
+//   - MOTD (message of the day)
+//
+// Types reused from the Safira library:
+//   UserInfo      (UserInfo.h)     — per-client metadata
+//   ChatMessage   (UserInfo.h)     — username + message pair for history
+//   ClientID      (Common.h)       — strong client identifier
+//   ClientInfo    (Server.h)       — per-connection transport state
+//   ByteSpan      (Types.h)        — non-owning byte view
 // ═════════════════════════════════════════════════════════════════════════════
 
-#include "Layer.h"
-#include "Server.h"
+#include "Server.h"         // Server, ServerConfig, ClientInfo, ClientID, ClientMetrics
+#include "ServerPacket.h"   // packet types, BufferWriter, UserInfo, ChatMessage
+#include "Layer.h"          // Safira::Layer base class
 #include "Console.h"
-#include "UserInfo.h"
 
+#include <chrono>
 #include <filesystem>
-#include <map>
+#include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-client rate-limit state  (sliding window)
+// ─────────────────────────────────────────────────────────────────────────────
+struct RateLimitEntry {
+    std::vector<std::chrono::steady_clock::time_point> Timestamps;
+    int Violations = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ServerLayer
+// ─────────────────────────────────────────────────────────────────────────────
 class ServerLayer : public Safira::Layer {
 public:
-    void OnAttach()          override;
-    void OnDetach()          override;
-    void OnUpdate(float ts)  override;
-    void OnUIRender()        override;
+    void OnAttach() override;
+    void OnDetach() override;
+    void OnUpdate(float ts) override;
+    void OnUIRender() override;
+
+    void Quit();
+    bool KickUser(std::string_view username, std::string_view reason);
 
 private:
-    // ── Server event callbacks ──────────────────────────────────────────────
+    // ── Server callbacks ────────────────────────────────────────────────────
     void OnClientConnected   (Safira::ClientInfo& clientInfo);
     void OnClientDisconnected(Safira::ClientInfo& clientInfo);
     void OnDataReceived      (Safira::ClientInfo& clientInfo, Safira::ByteSpan data);
 
-    // ── Outgoing packets ────────────────────────────────────────────────────
-    void SendClientList                     (const Safira::ClientInfo& clientInfo);
-    void SendClientListToAllClients         ();
-    void SendClientConnect                  (const Safira::ClientInfo& clientInfo);
-    void SendClientDisconnect               (const Safira::ClientInfo& clientInfo);
-    void SendClientConnectionRequestResponse(const Safira::ClientInfo&, bool response);
-    void SendMessageToAllClients            (const Safira::ClientInfo& from, std::string_view message);
-    void SendMessageHistory                 (const Safira::ClientInfo& clientInfo);
-    void SendServerShutdownToAllClients     ();
-    void SendClientKick                     (const Safira::ClientInfo&, std::string_view reason);
-
-    // ── Private chat signalling ─────────────────────────────────────────────
-    void ForwardPrivateChatInvite   (Safira::ClientID targetID, const std::string& fromUsername);
-    void ForwardPrivateChatConnectTo(Safira::ClientID initiatorID,
-                                     const std::string& responderUsername,
-                                     const std::string& responderIPAndPort);
-    void ForwardPrivateChatDeclined (Safira::ClientID initiatorID,
-                                     const std::string& responderUsername);
-
-    // ── Commands ────────────────────────────────────────────────────────────
-    bool KickUser(std::string_view username, std::string_view reason = "");
-    void Quit();
-    void OnCommand(std::string_view command);
-
-    // ── Helpers ─────────────────────────────────────────────────────────────
-    [[nodiscard]] bool IsValidUsername(const std::string& username) const;
-
-    [[nodiscard]] const std::string& GetClientUsername(Safira::ClientID id) const;
-    [[nodiscard]] uint32_t           GetClientColor   (Safira::ClientID id) const;
-
-    [[nodiscard]] std::optional<Safira::ClientID> FindClientID(const std::string& username) const;
-
-    void SendChatMessage(std::string_view message);
-    void SaveMessageHistoryToFile (const std::filesystem::path&);
-    bool LoadMessageHistoryFromFile(const std::filesystem::path&);
-
-    // ── Private-chat invite cleanup on disconnect ───────────────────────────
+    // ── Private chat brokering ──────────────────────────────────────────────
     void CleanupPendingInvites(Safira::ClientID disconnectedID,
                                const std::string& disconnectedUsername);
+    void ForwardPrivateChatInvite   (Safira::ClientID targetID,    const std::string& fromUsername);
+    void ForwardPrivateChatConnectTo(Safira::ClientID initiatorID, const std::string& responderUsername,
+                                     const std::string& responderIPAndPort);
+    void ForwardPrivateChatDeclined (Safira::ClientID initiatorID, const std::string& responderUsername);
+
+    // ── Send helpers ────────────────────────────────────────────────────────
+    void SendClientList                  (const Safira::ClientInfo& clientInfo);
+    void SendClientListToAllClients      ();
+    void SendClientConnect               (const Safira::ClientInfo& newClient);
+    void SendClientDisconnect            (const Safira::ClientInfo& clientInfo);
+    void SendClientConnectionRequestResponse(const Safira::ClientInfo& clientInfo, bool response);
+    void SendMessageToAllClients         (const Safira::ClientInfo& from, std::string_view message);
+    void SendMessageHistory              (const Safira::ClientInfo& clientInfo);
+    void SendServerShutdownToAllClients  ();
+    void SendClientKick                  (const Safira::ClientInfo& clientInfo, std::string_view reason);
+    void SendChatMessage                 (std::string_view message);
+
+    // ── Commands ────────────────────────────────────────────────────────────
+    void OnCommand(std::string_view command);
+
+    // ── Rate limiting ───────────────────────────────────────────────────────
+    bool IsRateLimited(Safira::ClientID id);
+
+    // ── Username validation ─────────────────────────────────────────────────
+    [[nodiscard]] std::optional<std::string> ValidateUsername(const std::string& username) const;
+    [[nodiscard]] bool IsValidUsername(const std::string& username) const;
+
+    // ── Lookup helpers ──────────────────────────────────────────────────────
+    [[nodiscard]] const std::string& GetClientUsername(Safira::ClientID id) const;
+    [[nodiscard]] uint32_t           GetClientColor   (Safira::ClientID id) const;
+    [[nodiscard]] std::optional<Safira::ClientID> FindClientID(const std::string& username) const;
+
+    // ── Persistence ─────────────────────────────────────────────────────────
+    void SaveMessageHistoryToFile(const std::filesystem::path& filepath);
+    bool LoadMessageHistoryFromFile(const std::filesystem::path& filepath);
 
     // ── Members ─────────────────────────────────────────────────────────────
-    std::unique_ptr<Safira::Server>                      m_Server;
-    Console                                              m_Console { "Server Console" };
-    std::vector<Safira::ChatMessage>                     m_MessageHistory;
-    std::filesystem::path                                m_MessageHistoryFilePath;
+    std::unique_ptr<Safira::Server> m_Server;
+    Console                         m_Console;
+    std::vector<uint8_t>            m_ScratchBuffer;
 
-    Safira::ByteBuffer                                   m_ScratchBuffer;
+    std::unordered_map<Safira::ClientID, Safira::UserInfo> m_ConnectedClients;
+    std::unordered_map<std::string, Safira::ClientID>      m_PendingPrivateChatInvites;
+    std::unordered_map<Safira::ClientID, RateLimitEntry>   m_RateLimitState;
+    std::unordered_set<std::string>                        m_MutedUsers;
 
-    std::map<Safira::ClientID, Safira::UserInfo>         m_ConnectedClients;
+    std::string m_Motd;
 
-    std::map<std::string, Safira::ClientID>              m_PendingPrivateChatInvites;
+    // ChatMessage from UserInfo.h — reused directly for history persistence.
+    std::vector<Safira::ChatMessage>  m_MessageHistory;
+    std::filesystem::path             m_MessageHistoryFilePath;
 
-    static constexpr float kClientListInterval = 10.0f;
-    float m_ClientListTimer = kClientListInterval;
+    float m_ClientListTimer = 0.0f;
+    static constexpr float kClientListInterval = 5.0f;
 };
 
-#endif // PQC_MASTER_THESIS_2026_SERVERLAYER_H
+#endif // PQC_MASTER_THESIS_2026_SERVER_LAYER_H

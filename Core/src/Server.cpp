@@ -8,6 +8,15 @@
 // §3.4   Typestate         — std::visit dispatches on ConnectionState
 // §5.2   Testing           — pure init helpers are independently testable
 // §5.5   Secret lifetimes  — RAII everywhere; zero manual new/delete
+//
+// ── New in v2 ────────────────────────────────────────────────────────────────
+//  - ReapStaleHandshakes() — timeout enforcement for Handshaking clients
+//  - Max connection cap     — DispatchPacket rejects beyond MaxClients
+//  - ClientMetrics          — bytes/messages tracked in DriveConnected
+//  - Thread-safe send queue — SendToClient/SendToAllClients → m_SendQueue
+//  - DrainSendQueue()       — network thread flushes the queue each tick
+//  - ProcessPendingKicks()  — network thread processes kick requests
+//  - Graceful shutdown      — close_notify to all clients before teardown
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include <algorithm>
@@ -50,7 +59,7 @@ static bool IsWantIO(int err) noexcept {
 // Ctor / Dtor
 // ═════════════════════════════════════════════════════════════════════════════
 
-Server::Server(uint16_t port) : m_Port(port) {}
+Server::Server(const ServerConfig& config) : m_Config(config) {}
 
 Server::~Server() {
     Stop();
@@ -74,6 +83,49 @@ void Server::Stop() {
 void Server::OnDataReceived(DataReceivedCallback fn)             { m_OnDataReceived       = std::move(fn); }
 void Server::OnClientConnected(ClientConnectedCallback fn)       { m_OnClientConnected    = std::move(fn); }
 void Server::OnClientDisconnected(ClientDisconnectedCallback fn) { m_OnClientDisconnected = std::move(fn); }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Thread-safe send API
+//
+// These are called from any thread (ServerLayer / UI).  They serialize
+// the payload into a PendingSend and push it onto m_SendQueue, which
+// the network thread drains each tick via DrainSendQueue().
+// ═════════════════════════════════════════════════════════════════════════════
+
+void Server::SendToClient(ClientID id, ByteSpan buf) {
+    std::lock_guard lock(m_SendMutex);
+    m_SendQueue.push_back(PendingSend{
+        .Target    = id,
+        .Data      = { buf.begin(), buf.end() },
+        .Broadcast = false,
+        .Exclude   = {},
+    });
+}
+
+void Server::SendToAllClients(ByteSpan buf, ClientID exclude) {
+    std::lock_guard lock(m_SendMutex);
+    m_SendQueue.push_back(PendingSend{
+        .Target    = {},
+        .Data      = { buf.begin(), buf.end() },
+        .Broadcast = true,
+        .Exclude   = exclude,
+    });
+}
+
+void Server::KickClient(ClientID id) {
+    std::lock_guard lock(m_KickMutex);
+    m_PendingKicks.push_back(id);
+}
+
+std::optional<ClientMetrics> Server::GetClientMetrics(ClientID id) const {
+    // Note: only safe when called from the network thread callbacks
+    // (which is the typical usage from ServerLayer's OnDataReceived).
+    // For cross-thread reads, the caller should use the data received
+    // from callbacks rather than polling.
+    if (auto it = m_Clients.find(id); it != m_Clients.end())
+        return it->second.Metrics;
+    return std::nullopt;
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // wolfSSL custom I/O  (static)
@@ -107,22 +159,16 @@ int Server::IOSend(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
         io->Socket, buf, static_cast<std::size_t>(sz), 0,
         reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
 
+    // Track bytes sent in client metrics.
+    if (sent > 0)
+        io->Client->Metrics.BytesSent += static_cast<uint64_t>(sent);
+
     return (sent < 0) ? WOLFSSL_CBIO_ERR_GENERAL
                       : static_cast<int>(sent);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // §3.2 — Result types with monadic operations  (Slides 88-89)
-//
-// Each helper is a pure function: input → expected<output, error>.
-// They compose via and_then (flat-map) and transform (map), mirroring
-// Rust's Result::and_then and Result::map that the slides motivate.
-//
-//   CreateSocket()                  → expected<int, ServerError>
-//     .and_then(CreateTLSContext)   → expected<WolfContext, ServerError>
-//     .transform(bundle)           → expected<InitResources, ServerError>
-//
-// No intermediate error checks.  No unchecked return codes.
 // ═════════════════════════════════════════════════════════════════════════════
 
 std::expected<int, ServerError> Server::CreateSocket() const {
@@ -136,7 +182,7 @@ std::expected<int, ServerError> Server::CreateSocket() const {
 
     const sockaddr_in local {
         .sin_family = AF_INET,
-        .sin_port   = htons(m_Port),
+        .sin_port   = htons(m_Config.Port),
         .sin_addr   = { .s_addr = INADDR_ANY },
         .sin_zero   = {},
     };
@@ -187,14 +233,6 @@ std::expected<WolfSession, ServerError> Server::CreateSession() const {
     return ssl;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// InitNetwork — the monadic chain.
-//
-// CreateSocket() produces a socket fd.  .and_then feeds it to a lambda that
-// calls CreateTLSContext() and, on success, .transform bundles both into an
-// InitResources.  If anything fails, the error propagates untouched — no
-// intermediate if-checks, exactly like Rust's `?` operator.
-// ─────────────────────────────────────────────────────────────────────────────
 std::expected<InitResources, ServerError> Server::InitNetwork() const {
     return CreateSocket()
         .and_then([this](int sock) -> std::expected<InitResources, ServerError> {
@@ -206,12 +244,10 @@ std::expected<InitResources, ServerError> Server::InitNetwork() const {
 }
 
 std::expected<GeneratedCredentials, ServerError> Server::GenerateSelfSignedCert() const {
-    // ── RNG ─────────────────────────────────────────────────────────────
     WC_RNG rng;
     if (wc_InitRng(&rng) != 0)
         return std::unexpected(ServerError::CertificateGeneration);
 
-    // ── RSA key pair ────────────────────────────────────────────────────
     RsaKey key;
     if (wc_InitRsaKey(&key, nullptr) != 0) {
         wc_FreeRng(&rng);
@@ -224,7 +260,6 @@ std::expected<GeneratedCredentials, ServerError> Server::GenerateSelfSignedCert(
         return std::unexpected(ServerError::CertificateGeneration);
     }
 
-    // ── Export private key to DER ───────────────────────────────────────
     std::vector<uint8_t> keyDer(4096);
     int keySz = wc_RsaKeyToDer(&key, keyDer.data(),
                                 static_cast<word32>(keyDer.size()));
@@ -235,7 +270,6 @@ std::expected<GeneratedCredentials, ServerError> Server::GenerateSelfSignedCert(
     }
     keyDer.resize(static_cast<size_t>(keySz));
 
-    // ── Self-signed X.509 certificate ───────────────────────────────────
     Cert cert;
     wc_InitCert(&cert);
     std::strncpy(cert.subject.commonName, "Safira DTLS Server", CTC_NAME_SIZE);
@@ -271,14 +305,6 @@ void Server::NetworkThreadFunc() {
 
     wolfSSL_Init();
 
-    // ── Monadic init ────────────────────────────────────────────────────────
-    //
-    // §3.2, Slides 88-89: "Result types … explicitly requiring the caller
-    // to unwrap the result."
-    //
-    // The entire init sequence is a single expression.  or_else handles the
-    // error path (log + bail).  On success we destructure with auto&.
-
     auto resources = InitNetwork()
         .or_else([this](ServerError e) -> std::expected<InitResources, ServerError> {
             OnFatalError(std::format("init: {}", Describe(e)));
@@ -293,10 +319,11 @@ void Server::NetworkThreadFunc() {
     m_Socket = resources->Socket;
     m_Ctx    = std::move(resources->Ctx);
 
-    std::println("[server] listening on port {}", m_Port);
+    std::println("[server] listening on port {} (max {} clients, hs timeout {:.0f}s)",
+                 m_Config.Port, m_Config.MaxClients, m_Config.HandshakeTimeoutSeconds);
 
     // ── Event loop ──────────────────────────────────────────────────────────
-    std::array<uint8_t, kRecvBufSize> rawBuf {};
+    std::vector<uint8_t> rawBuf(m_Config.RecvBufSize);
 
     while (m_Running.load(std::memory_order_acquire)) {
 
@@ -315,23 +342,32 @@ void Server::NetworkThreadFunc() {
         std::ranges::for_each(m_Clients | std::views::values,
                               [this](ClientInfo& c) { DriveClient(c); });
 
-        // 3. Reap dead clients — functional pipeline
-        //    filter → keys → collect → for_each erase
+        // 3. Housekeeping — stale handshakes, send queue, kicks, dead clients
+        ReapStaleHandshakes();
+        DrainSendQueue();
+        ProcessPendingKicks();
+
+        // 4. Reap dead clients (SSL reset = dead)
         std::vector<ClientID> dead;
         for (const auto& [id, client] : m_Clients)
             if (!client.SSL) dead.push_back(id);
 
         std::ranges::for_each(dead, [this](ClientID id) { RemoveClient(id); });
 
+        // 5. Update atomic client count
+        m_ClientCount.store(m_Clients.size(), std::memory_order_release);
+
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    // ── Shutdown ────────────────────────────────────────────────────────────
+    // ── Graceful shutdown ───────────────────────────────────────────────────
+    // Send close_notify to every connected client before tearing down.
     std::println("[server] shutting down, closing {} client(s)…", m_Clients.size());
 
     std::ranges::for_each(m_Clients | std::views::values,
                           [this](ClientInfo& c) { ShutdownClient(c); });
     m_Clients.clear();
+    m_ClientCount.store(0, std::memory_order_release);
 
     m_Ctx.reset();
     wolfSSL_Cleanup();
@@ -344,13 +380,8 @@ void Server::NetworkThreadFunc() {
 // ═════════════════════════════════════════════════════════════════════════════
 // DispatchPacket
 //
-// For new clients, session creation uses the monadic chain:
-//
-//   CreateSession()
-//       .transform(configure)    → WolfSession, fully configured
-//
-// If CreateSession fails the error is logged and the function returns
-// without ever inserting a half-built ClientInfo into the map.
+// v2: Enforces MaxClients cap before creating a new session.
+//     Tracks BytesRecv in metrics.
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Server::DispatchPacket(const sockaddr_in& from,
@@ -362,6 +393,14 @@ void Server::DispatchPacket(const sockaddr_in& from,
     if (auto it = m_Clients.find(id); it != m_Clients.end()) {
         auto& buf = it->second.EncryptedBuffer;
         buf.insert(buf.end(), data.begin(), data.end());
+        it->second.Metrics.BytesRecv += data.size();
+        return;
+    }
+
+    // ── Max clients cap ─────────────────────────────────────────────────────
+    if (m_Clients.size() >= m_Config.MaxClients) {
+        spdlog::warn("connection rejected from {} — server full ({}/{})",
+                     FormatAddr(from), m_Clients.size(), m_Config.MaxClients);
         return;
     }
 
@@ -384,13 +423,18 @@ void Server::DispatchPacket(const sockaddr_in& from,
     client.SSL        = std::move(*sessionResult);
     client.IO         = std::make_unique<IOContext>(&client, m_Socket);
 
+    // Metrics start now
+    client.Metrics.ConnectedAt = ClientMetrics::Clock::now();
+    client.Metrics.BytesRecv   = data.size();
+
     wolfSSL_SetIOReadCtx (client.SSL.get(), client.IO.get());
     wolfSSL_SetIOWriteCtx(client.SSL.get(), client.IO.get());
-    wolfSSL_dtls_set_mtu (client.SSL.get(), kDtlsMtu);
+    wolfSSL_dtls_set_mtu (client.SSL.get(), m_Config.DtlsMtu);
 
     client.EncryptedBuffer.assign(data.begin(), data.end());
 
-    spdlog::info("new connection from {}", addrStr);
+    spdlog::info("new connection from {} ({}/{} slots)",
+                 addrStr, m_Clients.size() + 1, m_Config.MaxClients);
 
     // Kick off the DTLS handshake — WANT_READ is expected.
     const int ret = wolfSSL_accept(client.SSL.get());
@@ -398,21 +442,16 @@ void Server::DispatchPacket(const sockaddr_in& from,
         const int err = wolfSSL_get_error(client.SSL.get(), ret);
         if (!IsWantIO(err)) {
             spdlog::error("wolfSSL_accept error {} for {}", err, addrStr);
-            return;                     // client drops → RAII cleanup
+            return;
         }
     }
 
-    // Move into map, then fix the IOContext back-pointer (the map node is
-    // heap-allocated and address-stable after insertion).
     auto [it, _] = m_Clients.emplace(id, std::move(client));
     it->second.IO->Client = &it->second;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // §3.4 — Typestate dispatch via std::visit
-//
-// Adding a third state (e.g. Rekeying) is a compile error here until
-// you add the handler — same benefit the notes describe for Rust.
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Server::DriveClient(ClientInfo& client) {
@@ -450,6 +489,9 @@ void Server::DriveConnected(ClientInfo& client) {
             static_cast<int>(plaintext.size()));
 
         if (bytes > 0) {
+            // Update metrics
+            client.Metrics.MessagesRecv++;
+
             if (m_OnDataReceived)
                 m_OnDataReceived(client,
                     ByteSpan(reinterpret_cast<const uint8_t*>(plaintext.data()),
@@ -467,10 +509,100 @@ void Server::DriveConnected(ClientInfo& client) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// RemoveClient / ShutdownClient — RAII does the heavy lifting.
-//
-// BUG FIX from original: the old code set SSL = nullptr then called
-// wolfSSL_GetIOReadCtx(nullptr), leaking the IOContext every time.
+// Housekeeping — called once per tick in the network loop
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── ReapStaleHandshakes ─────────────────────────────────────────────────────
+// Clients that have been in Handshaking for longer than the configured
+// timeout are forcefully removed.  This prevents half-open connections
+// from consuming server resources indefinitely (e.g. port scans, network
+// failures mid-handshake, or slow clients).
+
+void Server::ReapStaleHandshakes() {
+    const auto now      = ClientMetrics::Clock::now();
+    const auto timeout  = std::chrono::duration<float>(m_Config.HandshakeTimeoutSeconds);
+
+    std::vector<ClientID> stale;
+
+    for (const auto& [id, client] : m_Clients) {
+        if (!std::holds_alternative<Handshaking>(client.State))
+            continue;
+
+        const auto elapsed = now - client.Metrics.ConnectedAt;
+        if (elapsed > timeout)
+            stale.push_back(id);
+    }
+
+    for (const auto& id : stale) {
+        if (auto it = m_Clients.find(id); it != m_Clients.end()) {
+            spdlog::warn("handshake timeout for {} ({:.1f}s), reaping",
+                         it->second.AddressStr,
+                         std::chrono::duration<double>(now - it->second.Metrics.ConnectedAt).count());
+            it->second.SSL.reset();   // will be reaped in the dead-client pass
+        }
+    }
+}
+
+// ── DrainSendQueue ──────────────────────────────────────────────────────────
+// Moves all pending sends from the thread-safe queue into a local vector,
+// then processes them on the network thread where wolfSSL calls are safe.
+
+void Server::DrainSendQueue() {
+    std::vector<PendingSend> batch;
+    {
+        std::lock_guard lock(m_SendMutex);
+        batch.swap(m_SendQueue);
+    }
+
+    for (const auto& send : batch) {
+        ByteSpan span(send.Data.data(), send.Data.size());
+        if (send.Broadcast)
+            DoSendToAllClients(span, send.Exclude);
+        else
+            DoSendToClient(send.Target, span);
+    }
+}
+
+// ── ProcessPendingKicks ─────────────────────────────────────────────────────
+
+void Server::ProcessPendingKicks() {
+    std::vector<ClientID> kicks;
+    {
+        std::lock_guard lock(m_KickMutex);
+        kicks.swap(m_PendingKicks);
+    }
+
+    std::ranges::for_each(kicks, [this](ClientID id) { RemoveClient(id); });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Internal send — network thread only (no mutex)
+// ═════════════════════════════════════════════════════════════════════════════
+
+void Server::DoSendToClient(ClientID id, ByteSpan buf) {
+    auto it = m_Clients.find(id);
+    if (it == m_Clients.end()) return;
+
+    auto& client = it->second;
+
+    if (!std::holds_alternative<Connected>(client.State)) {
+        spdlog::warn("send to {} before handshake", client.AddressStr);
+        return;
+    }
+
+    const int ret = wolfSSL_write(
+        client.SSL.get(), buf.data(), static_cast<int>(buf.size()));
+    if (ret <= 0)
+        spdlog::error("wolfSSL_write failed for {}", client.AddressStr);
+}
+
+void Server::DoSendToAllClients(ByteSpan buf, ClientID exclude) {
+    for (auto& [id, _] : m_Clients)
+        if (id != exclude) DoSendToClient(id, buf);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// RemoveClient / ShutdownClient
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Server::ShutdownClient(ClientInfo& client) {
@@ -490,34 +622,8 @@ void Server::RemoveClient(ClientID id) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Send — typestate guards
+// OnFatalError
 // ═════════════════════════════════════════════════════════════════════════════
-
-void Server::SendToClient(ClientID id, ByteSpan buf) {
-    auto it = m_Clients.find(id);
-    if (it == m_Clients.end()) return;
-
-    auto& client = it->second;
-
-    if (!std::holds_alternative<Connected>(client.State)) {
-        spdlog::warn("send to {} before handshake", client.AddressStr);
-        return;
-    }
-
-    const int ret = wolfSSL_write(
-        client.SSL.get(), buf.data(), static_cast<int>(buf.size()));
-    if (ret <= 0)
-        spdlog::error("wolfSSL_write failed for {}", client.AddressStr);
-}
-
-void Server::SendToAllClients(ByteSpan buf, ClientID exclude) {
-    for (auto& [id, _] : m_Clients)
-        if (id != exclude) SendToClient(id, buf);
-}
-
-void Server::KickClient(ClientID id) {
-    RemoveClient(id);
-}
 
 void Server::OnFatalError(std::string_view msg) {
     spdlog::critical("[server] fatal: {}", msg);
