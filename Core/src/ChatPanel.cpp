@@ -87,22 +87,16 @@ std::optional<int> ChatPanel::RenderFullLayout(
         && conversations[activeIdx].Messages)
     {
         auto& convo = conversations[activeIdx];
+        ImGui::SetCursorPos({ 14.0f, 8.0f });
         RenderStatusIndicator(true, false, convo.Title);
         float msgH = ImGui::GetContentRegionAvail().y - kInputBarHeight - 8.0f;
         RenderMessages(*convo.Messages, chatW, msgH, ownUsername);
         RenderInputBar(chatW, ownUsername);
     } else {
-        ImFont* bold = GetBoldFont();
-        const char* title = "Safira";
-        ImVec2 tSz = MeasureText(bold, title);
-        ImGui::SetCursorPos({ (chatW - tSz.x) * 0.5f, avail.y * 0.38f });
-        if (bold) ImGui::PushFont(bold);
-        ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", title);
-        if (bold) ImGui::PopFont();
-
         const char* sub = "Select a conversation or start a new one.";
-        ImVec2 sSz = MeasureText(GetBodyFont(), sub);
-        ImGui::SetCursorPosX((chatW - sSz.x) * 0.5f);
+        ImFont* body = GetBodyFont();
+        ImVec2 sSz = MeasureText(body, sub);
+        ImGui::SetCursorPos({ (chatW - sSz.x) * 0.5f, avail.y * 0.45f });
         ImGui::TextColored(U32ToVec4(Colors.TextMuted), "%s", sub);
     }
 
@@ -464,29 +458,100 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImFont* bold = GetBoldFont();
+    ImFont* body = GetBodyFont();
 
-    float startX = ImGui::GetCursorPosX() + 12.0f;
-    ImGui::SetCursorPosX(startX);
+    // Use cursor position set by caller (no additional left offset)
+    const float startX  = ImGui::GetCursorPosX();
+    const float regionW = ImGui::GetContentRegionAvail().x + startX; // total width
+    const float rightPad = startX; // match left padding on right side
 
-    // In private mode, show peer avatar icon before name
-    if (m_PrivateMode && m_PeerAvatarTex) {
+    // ── In private mode: [avatar] [name] [dot] ............. [Leave] ────
+    // The "Connected (...)" label is omitted to save horizontal space;
+    // the status dot alone conveys the connection state.
+    if (m_PrivateMode) {
+        // Measure Leave button so we can reserve space on the right
+        constexpr float btnPadX = 10.0f;
+        constexpr float btnPadY = 3.0f;
+        ImVec2 leaveSz = MeasureText(body, "Leave");
+        const float btnW = leaveSz.x + btnPadX * 2.0f;
+
+        // Right edge for name truncation (leave room for button + gap)
+        const float leaveX = regionW - rightPad - btnW;
+        const float nameRightEdge = leaveX - 20.0f; // gap before button
+
+        float cursorX = startX;
+
+        // Avatar circle
         ImVec2 pos = ImGui::GetCursorScreenPos();
-        float iconR = 12.0f;
+        constexpr float iconR = 12.0f;
         float iconCx = pos.x + iconR;
         float iconCy = pos.y + FontHeight(bold) * 0.5f;
-        DrawAvatar(dl, iconCx, iconCy, iconR, peer.empty() ? '?' : (char)toupper(peer[0]),
-                   Colors.Accent, Colors.AccentText, m_PeerAvatarTex);
-        ImGui::SetCursorPosX(startX + iconR * 2.0f + 8.0f);
-    } else if (m_PrivateMode) {
-        // No peer avatar texture, draw letter circle
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        float iconR = 12.0f;
-        float iconCx = pos.x + iconR;
-        float iconCy = pos.y + FontHeight(bold) * 0.5f;
-        DrawAvatar(dl, iconCx, iconCy, iconR, peer.empty() ? '?' : (char)toupper(peer[0]),
-                   Colors.Accent, Colors.AccentText, ImTextureID{});
-        ImGui::SetCursorPosX(startX + iconR * 2.0f + 8.0f);
+        char letter = peer.empty() ? '?' : (char)toupper(peer[0]);
+        DrawAvatar(dl, iconCx, iconCy, iconR, letter,
+                   Colors.Accent, Colors.AccentText,
+                   m_PeerAvatarTex ? m_PeerAvatarTex : ImTextureID{});
+        cursorX = startX + iconR * 2.0f + 8.0f;
+        ImGui::SetCursorPosX(cursorX);
+
+        // Peer name (truncated to fit before Leave button)
+        {
+            const float maxNameW = nameRightEdge - cursorX;
+            ImVec2 nameSz = MeasureText(bold, peer.c_str());
+
+            if (bold) ImGui::PushFont(bold);
+            if (nameSz.x <= maxNameW || maxNameW <= 0) {
+                ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", peer.c_str());
+            } else {
+                // Truncate with ellipsis
+                std::string truncated = peer;
+                ImVec2 dotsSz = MeasureText(bold, "...");
+                while (!truncated.empty()) {
+                    truncated.pop_back();
+                    ImVec2 sz = MeasureText(bold, truncated.c_str());
+                    if (sz.x + dotsSz.x <= maxNameW) {
+                        truncated += "...";
+                        break;
+                    }
+                }
+                ImGui::TextColored(U32ToVec4(Colors.TextPrimary), "%s", truncated.c_str());
+            }
+            if (bold) ImGui::PopFont();
+        }
+
+        ImGui::SameLine(0.0f, 8.0f);
+
+        // Status dot (compact, no label)
+        ImVec2 dotPos = ImGui::GetCursorScreenPos();
+        float textH = ImGui::GetFontSize();
+        dl->AddCircleFilled({ dotPos.x + 4.0f, dotPos.y + textH * 0.5f },
+                            4.0f, dotCol, 12);
+        ImGui::Dummy({ 12.0f, textH }); // advance past dot
+
+        // Leave button pinned to right
+        if (m_OnLeave) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(leaveX);
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 50, 50, 200));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(180, 60, 60, 230));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(200, 70, 70, 255));
+            ImGui::PushStyleColor(ImGuiCol_Text,           IM_COL32(255, 255, 255, 255));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { btnPadX, btnPadY });
+
+            if (ImGui::Button("Leave##pvt")) {
+                m_OnLeave();
+            }
+
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+        }
+
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
+        return;
     }
+
+    // ── Non-private (Lobby) mode: [name] [dot] [Connected (...)] ────────
 
     // Peer name
     if (bold) ImGui::PushFont(bold);
@@ -503,24 +568,6 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
 
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 14.0f);
     ImGui::TextColored(U32ToVec4(Colors.TextSecondary), "%s", label.c_str());
-
-    // "Leave" button in private mode
-    if (m_PrivateMode && m_OnLeave) {
-        ImGui::SameLine(0.0f, 16.0f);
-        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 50, 50, 200));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(180, 60, 60, 230));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(200, 70, 70, 255));
-        ImGui::PushStyleColor(ImGuiCol_Text,           IM_COL32(255, 255, 255, 255));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 10.0f, 3.0f });
-
-        if (ImGui::Button("Leave##pvt")) {
-            m_OnLeave();
-        }
-
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(4);
-    }
 
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
 }

@@ -6,6 +6,8 @@
 
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 #include <fstream>
 #include <ranges>
 #include <format>
@@ -49,6 +51,47 @@ void SidebarDrawTextAt(ImFont* f, ImVec2 pos, ImU32 col,
     if (f) ImGui::PopFont();
 }
 
+// Draw text truncated with "..." if it exceeds maxW pixels.
+void SidebarDrawTextTruncated(ImFont* f, ImVec2 pos, ImU32 col,
+                              const char* text, float maxW) {
+    if (f) ImGui::PushFont(f);
+
+    ImVec2 fullSz = ImGui::CalcTextSize(text);
+    if (fullSz.x <= maxW) {
+        // Fits — draw normally
+        ImGui::GetWindowDrawList()->AddText(
+            ImGui::GetFont(), ImGui::GetFontSize(), pos, col, text);
+    } else {
+        // Truncate: find how many chars fit, then append "..."
+        const char* ellipsis = "...";
+        float ellipsisW = ImGui::CalcTextSize(ellipsis).x;
+        float availW = maxW - ellipsisW;
+        if (availW < 0.0f) availW = 0.0f;
+
+        // Binary-ish search for the longest substring that fits
+        int len = (int)strlen(text);
+        int lo = 0, hi = len, best = 0;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            ImVec2 sz = ImGui::CalcTextSize(text, text + mid);
+            if (sz.x <= availW) {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+
+        // Build truncated string
+        std::string trunc(text, best);
+        trunc += ellipsis;
+        ImGui::GetWindowDrawList()->AddText(
+            ImGui::GetFont(), ImGui::GetFontSize(), pos, col, trunc.c_str());
+    }
+
+    if (f) ImGui::PopFont();
+}
+
 } // anon namespace
 
 static void DrawIconShape(ImDrawList* draw, ImVec2 center, float radius, uint8_t idx) {
@@ -71,6 +114,10 @@ void ClientLayer::OnAttach() {
     m_Client->OnDataReceived      ([this](Safira::ByteSpan data)  { OnDataReceived(data); });
 
     m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
+
+    // Set logout callback for titlebar button
+    auto& app = Safira::ApplicationGUI::Get();
+    app.m_OnLogout = [this]() { Logout(); };
 
     LoadConnectionDetails(m_ConnectionDetailsFilePath);
 }
@@ -191,7 +238,7 @@ void ClientLayer::LoadAvatarImage(const std::string& filepath) {
         Safira::ImageFormat::RGBA, pixels);
     stbi_image_free(pixels);
 
-    m_AvatarTexture = reinterpret_cast<ImTextureID>(m_AvatarImage->GetDescriptorSet());
+    m_AvatarTexture = (ImTextureID)m_AvatarImage->GetDescriptorSet();
     m_AvatarImagePath = filepath;
     spdlog::info("Avatar image loaded: {}x{} from {}", w, h, filepath);
 }
@@ -222,6 +269,13 @@ void ClientLayer::Logout() {
     m_ConversationList.clear();
 
     m_Console.ClearLog();
+
+    // Clear titlebar state
+    auto& app = Safira::ApplicationGUI::Get();
+    app.m_TitlebarUserName.clear();
+    app.m_TitlebarConnected  = false;
+    app.m_TitlebarAvatarTex   = ImTextureID{};
+    app.m_UserManualAway      = false;
 
     // Connection modal will re-open automatically because
     // status != Connected triggers ImGui::OpenPopup in UI_ConnectionModal
@@ -400,7 +454,7 @@ void ClientLayer::UI_ConnectionModal() {
         // Set titlebar user info
         auto& app = Safira::ApplicationGUI::Get();
         app.m_TitlebarUserName    = m_Username;
-        app.m_TitlebarUserOnline  = true;
+        app.m_TitlebarConnected  = true;
         app.m_TitlebarAvatarTex   = m_AvatarTexture;
 
         ImGui::CloseCurrentPopup();
@@ -439,6 +493,8 @@ void ClientLayer::UI_UserListSection(float) {
         if (username.empty()) continue;
 
         const bool isOurs = (username == m_Username);
+        constexpr float itemPad = 14.0f;   // same as conversation list pad
+        ImGui::SetCursorPosX(itemPad);
         const ImVec2 pos    = ImGui::GetCursorScreenPos();
         const float  radius = kIconSize * 0.45f;
         const ImVec2 center = { pos.x + kIconSize * 0.5f, pos.y + kIconSize * 0.5f };
@@ -613,13 +669,20 @@ void ClientLayer::UI_IncomingInvites() {
         ImGui::Separator();
         ImGui::Spacing();
 
+        // Center the two buttons
+        constexpr float btnW = 120.0f;
+        constexpr float btnGap = 8.0f;
+        const float totalW = btnW * 2.0f + btnGap;
+        const float availW = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - totalW) * 0.5f);
+
         // Accept (gold)
         ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(218, 185, 107, 255));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(240, 206, 125, 255));
         ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(18, 18, 18, 255));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
-        if (ImGui::Button("Accept", { 120, 0 })) {
+        if (ImGui::Button("Accept", { btnW, 0 })) {
             StartPrivateChatAsResponder(invite.FromUsername);
             m_IncomingInvites.erase(m_IncomingInvites.begin());
             ImGui::CloseCurrentPopup();
@@ -628,14 +691,14 @@ void ClientLayer::UI_IncomingInvites() {
         ImGui::PopStyleVar();
         ImGui::PopStyleColor(3);
 
-        ImGui::SameLine();
+        ImGui::SameLine(0, btnGap);
 
         // Decline
         ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(60, 60, 60, 200));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(80, 50, 50, 220));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
-        if (ImGui::Button("Decline", { 120, 0 })) {
+        if (ImGui::Button("Decline", { btnW, 0 })) {
             SendPrivateChatResponse(invite.FromUsername, false);
             m_IncomingInvites.erase(m_IncomingInvites.begin());
             ImGui::CloseCurrentPopup();
@@ -684,43 +747,24 @@ void ClientLayer::UI_UnifiedChatWindow() {
     const float chatW = avail.x - sideW;
 
     // -- Left sidebar --------------------------------------------------------
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                          ImVec4{ 0.11f, 0.11f, 0.11f, 1.0f });
+                          ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
     ImGui::BeginChild("##Sidebar", { sideW, avail.y }, false,
                       ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
     {
         const float pad = 14.0f;
-        ImGui::SetCursorPos({ pad, pad });
-
-        ImFont* bold = SidebarBoldFont();
-        if (bold) ImGui::PushFont(bold);
-        ImGui::TextColored({ 0.85f, 0.73f, 0.42f, 1.0f }, "Safira");
-        if (bold) ImGui::PopFont();
-
-        // Logout button next to title
-        ImGui::SameLine(sideW - pad - 60.0f);
-        ImGui::PushStyleColor(ImGuiCol_Button,       IM_COL32(70, 50, 50, 180));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(120, 60, 60, 220));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(150, 60, 60, 255));
-        ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(210, 180, 180, 255));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 8, 2 });
-
-        if (ImGui::Button("Logout")) {
-            Logout();
-        }
-
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(4);
-
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
 
         const float userListH = std::min(
-            static_cast<float>(m_ConnectedClients.size()) * 26.0f + 40.0f,
+            static_cast<float>(m_ConnectedClients.size()) * 26.0f + 36.0f,
             avail.y * 0.35f);
 
-        ImGui::BeginChild("##UserSection", { sideW - 2, userListH }, false);
-        ImGui::SetCursorPos({ pad, 4.0f });
+        ImGui::SetCursorPos({ 0, 0 });
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+        ImGui::BeginChild("##UserSection", { sideW, userListH }, false);
+        ImGui::PopStyleVar();
+        ImGui::SetCursorPos({ pad, 8.0f });
         UI_UserListSection(sideW);
         ImGui::EndChild();
 
@@ -730,13 +774,14 @@ void ClientLayer::UI_UnifiedChatWindow() {
             ImVec2 p = ImGui::GetCursorScreenPos();
             dl->AddLine({ p.x + pad, p.y },
                         { p.x + sideW - pad, p.y },
-                        IM_COL32(56, 56, 56, 255), 1.0f);
+                        IM_COL32(48, 48, 48, 255), 1.0f);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
         }
 
         // Conversation list
         ImGui::BeginChild("##ConvoList", { 0, 0 }, false);
 
+        ImFont* bold = SidebarBoldFont();
         ImFont* body = SidebarBodyFont();
         if (body) ImGui::PushFont(body);
 
@@ -750,8 +795,8 @@ void ClientLayer::UI_UnifiedChatWindow() {
                 cursor, { cursor.x + itemSz.x, cursor.y + itemSz.y });
 
             ImU32 bg = 0;
-            if (i == m_ActiveConvoIdx) bg = IM_COL32(54, 54, 54, 255);
-            else if (hovered)          bg = IM_COL32(46, 46, 46, 255);
+            if (i == m_ActiveConvoIdx) bg = IM_COL32(28, 28, 28, 255);
+            else if (hovered)          bg = IM_COL32(32, 32, 32, 255);
 
             if (bg)
                 ImGui::GetWindowDrawList()->AddRectFilled(
@@ -793,15 +838,23 @@ void ClientLayer::UI_UnifiedChatWindow() {
             }
 
             const float textX = tx + kR * 2.0f + 10.0f;
+            const float rightEdge = cursor.x + sideW - pad - 4.0f;
 
-            SidebarDrawTextAt(bold, { textX, cursor.y + 8.0f },
-                              IM_COL32(210, 210, 210, 255), c.Title.c_str());
+            // Title — truncate accounting for time label on the right
+            float titleMaxW = rightEdge - textX;
+            if (!c.TimeLabel.empty()) {
+                ImVec2 tSz = ImGui::CalcTextSize(c.TimeLabel.c_str());
+                titleMaxW -= (tSz.x + 8.0f);  // gap before time label
+            }
+            SidebarDrawTextTruncated(bold, { textX, cursor.y + 8.0f },
+                              IM_COL32(210, 210, 210, 255),
+                              c.Title.c_str(), titleMaxW);
 
-            std::string preview = c.Preview.substr(0, 30);
-            if (c.Preview.size() > 30) preview += "...";
-            SidebarDrawTextAt(body, { textX, cursor.y + 28.0f },
+            // Preview — truncate to available width
+            const float previewMaxW = rightEdge - textX;
+            SidebarDrawTextTruncated(body, { textX, cursor.y + 28.0f },
                               IM_COL32(130, 130, 130, 255),
-                              preview.c_str());
+                              c.Preview.c_str(), previewMaxW);
 
             if (!c.TimeLabel.empty()) {
                 ImVec2 tSz = ImGui::CalcTextSize(c.TimeLabel.c_str());
@@ -824,10 +877,12 @@ void ClientLayer::UI_UnifiedChatWindow() {
     // -- Right chat area -----------------------------------------------------
     ImGui::SameLine(0.0f, 0.0f);
 
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
                           ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
     ImGui::BeginChild("##ChatArea", { chatW, avail.y }, false,
                       ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
 
     if (m_ActiveConvoIdx >= 0
         && m_ActiveConvoIdx < static_cast<int>(m_ConversationList.size())
@@ -880,6 +935,9 @@ void ClientLayer::UI_UnifiedChatWindow() {
             m_ChatPanel.SetOnLeaveCallback(nullptr);
         }
 
+        // Match left/top padding with sidebar "Online" header
+        ImGui::SetCursorPos({ 14.0f, 8.0f });
+
         m_ChatPanel.RenderChatArea(convo, m_Username, title,
                                    connected, handshaking);
 
@@ -901,22 +959,36 @@ void ClientLayer::UI_UnifiedChatWindow() {
         }
     } else {
         // Empty state
-        ImFont* bold = SidebarBoldFont();
-        if (bold) ImGui::PushFont(bold);
-        const char* appTitle = "Safira";
-        ImVec2 tSz = ImGui::CalcTextSize(appTitle);
-        ImGui::SetCursorPos({ (chatW - tSz.x) * 0.5f, avail.y * 0.38f });
-        ImGui::TextColored({ 0.85f, 0.73f, 0.42f, 1.0f }, "%s", appTitle);
-        if (bold) ImGui::PopFont();
-
-        const char* sub = "Post-Quantum Secure Messaging";
+        const char* sub = "Select a conversation or start a new one.";
         ImVec2 sSz = ImGui::CalcTextSize(sub);
-        ImGui::SetCursorPosX((chatW - sSz.x) * 0.5f);
+        ImGui::SetCursorPos({ (chatW - sSz.x) * 0.5f, avail.y * 0.45f });
         ImGui::TextColored({ 0.45f, 0.45f, 0.45f, 1.0f }, "%s", sub);
     }
 
     ImGui::EndChild(); // ChatArea
     ImGui::PopStyleColor();
+
+    // ── Separator lines ─────────────────────────────────────────────────
+    // Use the foreground draw list so lines render ON TOP of child windows.
+    // Skip when any modal popup is open (connection, invite, report) so
+    // lines don't bleed through them.
+    const bool anyModalOpen = !IsConnected()
+        || !m_IncomingInvites.empty()
+        || ImGui::IsPopupOpen("Report User##ReportModal");
+    if (!anyModalOpen) {
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        ImVec2 origin = ImGui::GetWindowPos();
+        const ImU32 lineCol = IM_COL32(48, 48, 48, 255);
+
+        // Horizontal line at top (separates titlebar from panels)
+        dl->AddLine(origin, { origin.x + avail.x, origin.y },
+                    lineCol, 1.0f);
+
+        // Vertical line between sidebar and chat area
+        dl->AddLine({ origin.x + sideW, origin.y },
+                    { origin.x + sideW, origin.y + avail.y },
+                    lineCol, 1.0f);
+    }
 
     ImGui::EndChild(); // ##ChatPanel
 }
@@ -934,7 +1006,7 @@ void ClientLayer::OnConnected() {
 
     // Update titlebar status
     auto& app = Safira::ApplicationGUI::Get();
-    app.m_TitlebarUserOnline = true;
+    app.m_TitlebarConnected = true;
 }
 
 void ClientLayer::OnDisconnected() {
@@ -946,7 +1018,7 @@ void ClientLayer::OnDisconnected() {
 
     // Update titlebar status
     auto& app = Safira::ApplicationGUI::Get();
-    app.m_TitlebarUserOnline = false;
+    app.m_TitlebarConnected = false;
 }
 
 // =========================================================================
@@ -1129,6 +1201,21 @@ void ClientLayer::StartPrivateChatAsInitiator(const std::string& peerUsername,
 void ClientLayer::SendChatMessage(std::string_view message) {
     std::string msg(message);
     if (!Safira::IsValidMessage(msg)) return;
+
+    // ── Handle /afk command locally ─────────────────────────────────────
+    if (msg == "/afk" || msg == "/away") {
+        auto& app = Safira::ApplicationGUI::Get();
+        app.m_UserManualAway = !app.m_UserManualAway;
+
+        const char* status = app.m_UserManualAway ? "Away" : "Online";
+        AddLobbyMessage("System",
+            std::format("Status changed to {}.", status),
+            0xFF888888, Safira::MessageRole::System);
+
+        if (!app.m_UserManualAway)
+            app.m_LastActivityTime = std::chrono::steady_clock::now();
+        return;  // don't send /afk to server
+    }
 
     Safira::BufferWriter writer(m_ScratchBuffer);
     Safira::SerializePacket(writer, Safira::MessagePacket{ msg });

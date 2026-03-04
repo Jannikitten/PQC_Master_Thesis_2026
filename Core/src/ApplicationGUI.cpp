@@ -8,6 +8,7 @@
 #include "stb_image.h"
 #include <stdio.h>          // printf, fprintf
 #include <stdlib.h>
+#include <chrono>
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -546,216 +547,363 @@ namespace Safira {
         g_ApplicationRunning = false;
     }
 
+
     // ─────────────────────────────────────────────────────────────────────────
-    // UI_DrawTitlebar — now includes a chat-panel toggle on the right
+    // UI_DrawTitlebar
     //
-    // On macOS the native traffic-light buttons sit on the LEFT of the
-    // titlebar, so we place our toggle button on the RIGHT.
+    // Layout:
+    //   LEFT:   avatar · username · clickable status dot (12px from edge)
+    //   RIGHT:  [Logout]  [chat-toggle]
+    //   No center content. No menubar.
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    //  Phase 1: UI_DrawTitlebar — background, avatar, text, dot (visual only)
+    //           Runs inside SafiraMainWindow BEFORE layers.
+    //
+    //  Phase 2: UI_DrawTitlebarButtons — transparent overlay window with the
+    //           actual interactive buttons (status dot, chat toggle, logout).
+    //           Runs AFTER all layers so it has highest z-order.
+    //
     // ─────────────────────────────────────────────────────────────────────────
     void ApplicationGUI::UI_DrawTitlebar(float& outTitlebarHeight) {
-        const float titlebarHeight = 58.0f;
+        const float titlebarHeight = 48.0f;
         const bool isMaximized = IsMaximized();
-        float titlebarVerticalOffset = isMaximized ? -6.0f : 0.0f;
-        const ImVec2 windowPadding = ImGui::GetCurrentWindow()->WindowPadding;
+        const float vOff = isMaximized ? -6.0f : 0.0f;
+        const ImVec2 wPad = ImGui::GetCurrentWindow()->WindowPadding;
 
-        ImGui::SetCursorPos(ImVec2(windowPadding.x, windowPadding.y + titlebarVerticalOffset));
-        const ImVec2 titlebarMin = ImGui::GetCursorScreenPos();
-        const ImVec2 titlebarMax = {
-            ImGui::GetCursorScreenPos().x + ImGui::GetWindowWidth() - windowPadding.y * 2.0f,
-            ImGui::GetCursorScreenPos().y + titlebarHeight
+        // ── Titlebar background ──────────────────────────────────────────────
+        ImGui::SetCursorPos({ wPad.x, wPad.y + vOff });
+        const ImVec2 tbMin = ImGui::GetCursorScreenPos();
+        const ImVec2 tbMax = {
+            tbMin.x + ImGui::GetWindowWidth() - wPad.y * 2.0f,
+            tbMin.y + titlebarHeight
         };
-        auto* bgDrawList = ImGui::GetBackgroundDrawList();
-        bgDrawList->AddRectFilled(titlebarMin, titlebarMax, UI::Colors::Theme::titlebar);
 
-        const float w = ImGui::GetContentRegionAvail().x;
-        constexpr float buttonsAreaWidth = 94;
+        // Cache for phase 2
+        m_CachedTbMin    = tbMin;
+        m_CachedTbMax    = tbMax;
+        m_CachedTbCenterY = tbMin.y + titlebarHeight * 0.5f;
+        m_CachedShowDot  = false;
 
-        // Title bar drag area
-        ImGui::SetCursorPos(ImVec2(windowPadding.x, windowPadding.y + titlebarVerticalOffset));
-        ImGui::InvisibleButton("##titleBarDragZone", ImVec2(w - buttonsAreaWidth, titlebarHeight));
-        m_TitleBarHovered = ImGui::IsItemHovered();
+        auto* bgDl = ImGui::GetBackgroundDrawList();
+        bgDl->AddRectFilled(tbMin, tbMax, IM_COL32(28, 28, 28, 255));
+        // Separator line between titlebar and content below
+        bgDl->AddLine({ tbMin.x, tbMax.y }, { tbMax.x, tbMax.y },
+                       IM_COL32(48, 48, 48, 255), 1.0f);
 
+        // ── Drag detection (mouse-rect only, no InvisibleButton) ────────────
+        m_TitleBarHovered = ImGui::IsMouseHoveringRect(tbMin, tbMax, false);
         if (isMaximized) {
-            float windowMousePosY = ImGui::GetMousePos().y - ImGui::GetCursorScreenPos().y;
-            if (windowMousePosY >= 0.0f && windowMousePosY <= 5.0f)
+            float mouseY = ImGui::GetMousePos().y - tbMin.y;
+            if (mouseY >= 0.0f && mouseY <= 5.0f)
                 m_TitleBarHovered = true;
         }
 
-        // ── User profile in top-left (avatar + username + status) ────────────
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImFont* bold = GetFont("Bold");
+        ImFont* body = GetFont("Default");
+        if (!body) body = ImGui::GetFont();
+
+        const float tbCenterY = m_CachedTbCenterY;
+
+        // ── AFK auto-detection ───────────────────────────────────────────────
         {
-            ImGui::SetNextItemAllowOverlap();
-            const float profileX = windowPadding.x + 12.0f;
-            const float profileY = windowPadding.y + titlebarVerticalOffset + 6.0f;
-            ImGui::SetCursorPos({ profileX, profileY });
+            const ImGuiIO& io = ImGui::GetIO();
+            bool anyActivity = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f
+                               || io.MouseWheel != 0.0f
+                               || !io.InputQueueCharacters.empty();
+            for (int m = 0; m < IM_ARRAYSIZE(io.MouseDown); ++m)
+                if (io.MouseDown[m]) { anyActivity = true; break; }
+            if (!anyActivity) {
+                for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k)
+                    if (ImGui::IsKeyDown(static_cast<ImGuiKey>(k)))
+                        { anyActivity = true; break; }
+            }
 
-            ImDrawList* profDl = ImGui::GetWindowDrawList();
-            const ImVec2 profScreenPos = ImGui::GetCursorScreenPos();
+            if (anyActivity) {
+                m_LastActivityTime = std::chrono::steady_clock::now();
+                if (m_UserManualAway)
+                    m_UserManualAway = false;
+            }
 
-            constexpr float avatarR = 18.0f;
-            const float avatarCx = profScreenPos.x + avatarR;
-            const float avatarCy = profScreenPos.y + avatarR + 2.0f;
+            const auto elapsed = std::chrono::steady_clock::now() - m_LastActivityTime;
+            const float secs = std::chrono::duration<float>(elapsed).count();
+            m_TitlebarUserOnline = m_TitlebarConnected
+                                   && !m_UserManualAway
+                                   && (secs < m_AfkTimeoutSeconds);
+        }
 
-            // Draw avatar (image or fallback letter)
+        // ── LEFT: User profile — visuals only (avatar, name, dot circle) ────
+        {
+            const float leftX = tbMin.x + 12.0f;
+            constexpr float avatarR = 13.0f;
+            const float ax = leftX + avatarR;
+
             if (m_TitlebarAvatarTex) {
-                profDl->AddImageRounded(
+                dl->AddImageRounded(
                     m_TitlebarAvatarTex,
-                    { avatarCx - avatarR, avatarCy - avatarR },
-                    { avatarCx + avatarR, avatarCy + avatarR },
+                    { ax - avatarR, tbCenterY - avatarR },
+                    { ax + avatarR, tbCenterY + avatarR },
                     { 0, 0 }, { 1, 1 },
                     IM_COL32(255, 255, 255, 255), avatarR);
             } else {
-                profDl->AddCircleFilled({ avatarCx, avatarCy }, avatarR,
-                    IM_COL32(218, 185, 107, 200), 24);
+                dl->AddCircleFilled({ ax, tbCenterY }, avatarR,
+                    IM_COL32(218, 185, 107, 180), 24);
 
-                char uLetter = m_TitlebarUserName.empty()
-                    ? 'S'
-                    : static_cast<char>(toupper(m_TitlebarUserName[0]));
-                char uBuf[2] = { uLetter, '\0' };
+                char letter = m_TitlebarUserName.empty()
+                    ? 'S' : (char)toupper(m_TitlebarUserName[0]);
+                char buf[2] = { letter, '\0' };
 
-                ImFont* bFont = GetFont("Bold");
-                ImFont* useFont = bFont ? bFont : ImGui::GetFont();
-                if (bFont) ImGui::PushFont(bFont);
-                ImVec2 lSz = ImGui::CalcTextSize(uBuf);
-                profDl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                    { avatarCx - lSz.x * 0.5f, avatarCy - lSz.y * 0.5f },
-                    IM_COL32(18, 18, 18, 255), uBuf);
-                if (bFont) ImGui::PopFont();
+                if (bold) ImGui::PushFont(bold);
+                ImVec2 lsz = ImGui::CalcTextSize(buf);
+                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    { ax - lsz.x * 0.5f, tbCenterY - lsz.y * 0.5f },
+                    IM_COL32(18, 18, 18, 255), buf);
+                if (bold) ImGui::PopFont();
             }
-
-            // Username text
-            const float textX = profScreenPos.x + avatarR * 2.0f + 10.0f;
 
             if (!m_TitlebarUserName.empty()) {
-                ImFont* boldF = GetFont("Bold");
-                if (boldF) ImGui::PushFont(boldF);
-                ImGui::SetCursorScreenPos({ textX, profScreenPos.y + 4.0f });
-                ImGui::TextColored({ 0.82f, 0.82f, 0.82f, 1.0f }, "%s",
-                                   m_TitlebarUserName.c_str());
-                if (boldF) ImGui::PopFont();
+                const float textX = leftX + avatarR * 2.0f + 8.0f;
 
-                // Online/Away status
-                const char* statusText = m_TitlebarUserOnline ? "Online" : "Away";
-                ImU32 statusCol = m_TitlebarUserOnline
-                    ? IM_COL32(76, 200, 76, 255)
-                    : IM_COL32(160, 160, 160, 180);
+                if (body) ImGui::PushFont(body);
+                ImVec2 nameSz = ImGui::CalcTextSize(m_TitlebarUserName.c_str());
+                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    { textX, tbCenterY - nameSz.y * 0.5f },
+                    IM_COL32(185, 185, 185, 220),
+                    m_TitlebarUserName.c_str());
+                if (body) ImGui::PopFont();
 
-                ImGui::SetCursorScreenPos({ textX, profScreenPos.y + 24.0f });
+                // Status dot — visual circle (interaction is in phase 2)
+                const float dotX  = textX + nameSz.x + 10.0f;
+                const float dotR  = 4.5f;
+                const float cx = dotX + dotR;
 
-                // Small status dot
-                ImVec2 dotPos = ImGui::GetCursorScreenPos();
-                profDl->AddCircleFilled({ dotPos.x + 4.0f, dotPos.y + 6.0f },
-                    3.0f, statusCol, 12);
+                const bool isAway   = m_TitlebarConnected && !m_TitlebarUserOnline;
+                const bool isOffline = !m_TitlebarConnected;
+                ImU32 dotCol;
+                if (isOffline)       dotCol = IM_COL32(130, 130, 130, 140);
+                else if (isAway)     dotCol = IM_COL32(210, 170, 50, 220);
+                else                 dotCol = IM_COL32(76, 200, 76, 255);
 
-                ImGui::SetCursorScreenPos({ dotPos.x + 12.0f, dotPos.y - 1.0f });
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(
-                    m_TitlebarUserOnline
-                        ? IM_COL32(120, 180, 120, 200)
-                        : IM_COL32(130, 130, 130, 160)),
-                    "%s", statusText);
-            } else {
-                // No user logged in -- show app name
-                ImFont* boldF = GetFont("Bold");
-                if (boldF) ImGui::PushFont(boldF);
-                ImGui::SetCursorScreenPos({ textX, profScreenPos.y + 10.0f });
-                ImGui::TextColored({ 0.85f, 0.73f, 0.42f, 1.0f }, "Safira");
-                if (boldF) ImGui::PopFont();
+                dl->AddCircleFilled({ cx, tbCenterY }, dotR, dotCol, 12);
+
+                // Cache dot position for phase 2
+                m_CachedDotCx  = cx;
+                m_CachedDotCy  = tbCenterY;
+                m_CachedShowDot = true;
             }
-
-            // Keep drag zone awareness
-            if (ImGui::IsMouseHoveringRect(
-                    profScreenPos,
-                    { profScreenPos.x + avatarR * 2.0f + 160.0f,
-                      profScreenPos.y + titlebarHeight - 12.0f }))
-                m_TitleBarHovered = false;
         }
 
-        // Draw Menubar (shifted right to avoid overlap with profile)
-        if (m_MenubarCallback) {
-            ImGui::SetNextItemAllowOverlap();
-            const float logoHorizontalOffset = 16.0f * 2.0f + 200.0f + windowPadding.x;
-            ImGui::SetCursorPos(ImVec2(logoHorizontalOffset, 6.0f + titlebarVerticalOffset));
-            UI_DrawMenubar();
-            if (ImGui::IsItemHovered())
-                m_TitleBarHovered = false;
+        outTitlebarHeight = titlebarHeight;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UI_DrawTitlebarButtons — Phase 2: transparent overlay with buttons.
+    //
+    // Called AFTER all layers render so this window is on top of everything.
+    // ─────────────────────────────────────────────────────────────────────────
+    void ApplicationGUI::UI_DrawTitlebarButtons() {
+        const ImVec2 tbMin = m_CachedTbMin;
+        const ImVec2 tbMax = m_CachedTbMax;
+        const float  tbH   = tbMax.y - tbMin.y;
+        const float  tbW   = tbMax.x - tbMin.x;
+
+        if (tbH <= 0.0f || tbW <= 0.0f) return;
+
+        // Create a frameless, transparent overlay exactly over the titlebar
+        ImGui::SetNextWindowPos(tbMin);
+        ImGui::SetNextWindowSize({ tbW, tbH });
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    { 0, 0 });
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+
+        const ImGuiWindowFlags flags =
+              ImGuiWindowFlags_NoDecoration
+            | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoResize
+            | ImGuiWindowFlags_NoNav
+            | ImGuiWindowFlags_NoScrollbar
+            | ImGuiWindowFlags_NoDocking
+            | ImGuiWindowFlags_NoFocusOnAppearing
+            | ImGuiWindowFlags_NoSavedSettings;
+
+        if (!ImGui::Begin("##TitlebarOverlay", nullptr, flags)) {
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(3);
+            return;
         }
 
-        // Centered Window title (subtle, smaller)
+        // All coordinates below are LOCAL to the overlay window.
+        // overlay (0,0) == tbMin in screen space.
+
+        constexpr float toggleSz = 30.0f;
+        constexpr float rightPad = 14.0f;
+        constexpr float gap      = 10.0f;
+
+        // ── Chat toggle (rightmost) ──────────────────────────────────────────
+        const float toggleX = tbW - rightPad - toggleSz;
+        const float toggleY = (tbH - toggleSz) * 0.5f;
+
+        ImGui::SetCursorPos({ toggleX, toggleY });
+
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(255, 255, 255, 20));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(255, 255, 255, 35));
+        ImGui::PushStyleColor(ImGuiCol_Border,         IM_COL32(48, 48, 48, 255));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+
+        if (ImGui::Button("##ChatToggle", { toggleSz, toggleSz }))
+            m_ChatPanelVisible = !m_ChatPanelVisible;
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(4);
+
+        // Draw bubble icon on top
         {
-            ImVec2 currentCursorPos = ImGui::GetCursorPos();
-            const char* titleText = "Safira";
-            ImVec2 textSize = ImGui::CalcTextSize(titleText);
-            ImGui::SetCursorPos(ImVec2(
-                ImGui::GetWindowWidth() * 0.5f - textSize.x * 0.5f,
-                2.0f + windowPadding.y + 6.0f));
-            ImGui::TextColored({ 0.55f, 0.55f, 0.55f, 0.5f }, "%s", titleText);
-            ImGui::SetCursorPos(currentCursorPos);
-        }
-
-        // ── Chat toggle button (right side) ─────────────────────────────────
-        {
-            constexpr float btnSize   = 30.0f;
-            constexpr float rightPad  = 16.0f;
-            const float btnX = ImGui::GetWindowWidth() - windowPadding.x
-                               - rightPad - btnSize;
-            const float btnY = windowPadding.y + titlebarVerticalOffset
-                               + (titlebarHeight - btnSize) * 0.5f;
-
-            ImGui::SetCursorPos({ btnX, btnY });
-
-            // Button styling — gold when active, dim when hidden
-            const ImVec4 colN = m_ChatPanelVisible
-                ? ImVec4{ 0.85f, 0.73f, 0.42f, 0.25f }
-                : ImVec4{ 0.30f, 0.30f, 0.30f, 0.25f };
-            const ImVec4 colH = ImVec4{ 0.85f, 0.73f, 0.42f, 0.45f };
-            const ImVec4 colA = ImVec4{ 0.85f, 0.73f, 0.42f, 0.60f };
-
-            ImGui::PushStyleColor(ImGuiCol_Button,        colN);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  colH);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   colA);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btnSize * 0.3f);
-
-            if (ImGui::Button("##ChatToggle", { btnSize, btnSize }))
-                m_ChatPanelVisible = !m_ChatPanelVisible;
-
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor(3);
-
-            // Draw a chat-bubble icon on the button
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            const ImVec2 bMin = ImGui::GetItemRectMin();
-            const ImVec2 bCen = {
-                bMin.x + btnSize * 0.5f,
-                bMin.y + btnSize * 0.5f
+            const ImVec2 tMin = ImGui::GetItemRectMin();
+            const ImVec2 tCen = {
+                tMin.x + toggleSz * 0.5f,
+                tMin.y + toggleSz * 0.5f
             };
-
             const ImU32 iconCol = m_ChatPanelVisible
                 ? IM_COL32(218, 185, 107, 230)
-                : IM_COL32(170, 170, 170, 160);
+                : IM_COL32(140, 140, 140, 130);
 
-            // Bubble body (rounded rect)
-            const float bw = 14.0f, bh = 10.0f;
-            const ImVec2 bubMin = { bCen.x - bw * 0.5f, bCen.y - bh * 0.5f - 1.0f };
-            const ImVec2 bubMax = { bCen.x + bw * 0.5f, bCen.y + bh * 0.5f - 1.0f };
+            const float bw = 13.0f, bh = 9.0f;
+            const ImVec2 bubMin = { tCen.x - bw*0.5f, tCen.y - bh*0.5f - 1.f };
+            const ImVec2 bubMax = { tCen.x + bw*0.5f, tCen.y + bh*0.5f - 1.f };
             dl->AddRectFilled(bubMin, bubMax, iconCol, 3.0f);
-
-            // Tail (small triangle at bottom-left)
             dl->AddTriangleFilled(
-                { bubMin.x + 3.0f, bubMax.y },
-                { bubMin.x + 0.0f, bubMax.y + 4.0f },
-                { bubMin.x + 7.0f, bubMax.y },
+                { bubMin.x + 2.5f, bubMax.y },
+                { bubMin.x - 0.5f, bubMax.y + 3.5f },
+                { bubMin.x + 6.5f, bubMax.y },
                 iconCol);
+        }
+        if (ImGui::IsItemHovered()) {
+            m_TitleBarHovered = false;
+            ImGui::SetTooltip(m_ChatPanelVisible
+                ? "Hide chat panel" : "Show chat panel");
+        }
+
+        // ── Logout button (left of toggle) ───────────────────────────────────
+        //    Ghost icon button matching the chat toggle style.
+        //    Draws a "door with arrow" logout icon via DrawList.
+        if (!m_TitlebarUserName.empty()) {
+            constexpr float logoutSz = 30.0f;
+            const float logoutX = toggleX - gap - logoutSz;
+            const float logoutY = (tbH - logoutSz) * 0.5f;
+
+            ImGui::SetCursorPos({ logoutX, logoutY });
+
+            // Ghost button — same style as chat toggle
+            ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  IM_COL32(200, 80, 80, 30));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   IM_COL32(200, 80, 80, 55));
+            ImGui::PushStyleColor(ImGuiCol_Border,         IM_COL32(48, 48, 48, 255));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+
+            if (ImGui::Button("##Logout", { logoutSz, logoutSz })) {
+                if (m_OnLogout) m_OnLogout();
+            }
+
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+
+            // Draw logout icon (door + arrow)
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 bMin = ImGui::GetItemRectMin();
+                const float cx = bMin.x + logoutSz * 0.5f;
+                const float cy = bMin.y + logoutSz * 0.5f;
+
+                const bool hov = ImGui::IsItemHovered();
+                const ImU32 col = hov
+                    ? IM_COL32(240, 90, 90, 255)
+                    : IM_COL32(190, 90, 90, 200);
+                const float t = 1.6f;  // stroke thickness
+
+                // Door frame (open rectangle, left side missing)
+                //   ┌───┐
+                //   │   │
+                //   └───┘
+                const float dw = 8.0f, dh = 11.0f;
+                const float dx = cx + 1.0f;  // shift door right slightly
+                const float dTop = cy - dh * 0.5f;
+                const float dBot = cy + dh * 0.5f;
+                const float dLeft  = dx - dw * 0.5f;
+                const float dRight = dx + dw * 0.5f;
+
+                // Top edge
+                dl->AddLine({ dLeft, dTop }, { dRight, dTop }, col, t);
+                // Right edge
+                dl->AddLine({ dRight, dTop }, { dRight, dBot }, col, t);
+                // Bottom edge
+                dl->AddLine({ dRight, dBot }, { dLeft, dBot }, col, t);
+                // Left edge — partial (top and bottom stubs, gap in middle for arrow)
+                dl->AddLine({ dLeft, dTop }, { dLeft, cy - 3.0f }, col, t);
+                dl->AddLine({ dLeft, cy + 3.0f }, { dLeft, dBot }, col, t);
+
+                // Arrow pointing left (exits through the door gap)
+                const float arrowTip = dLeft - 5.0f;
+                const float arrowBase = dLeft + 2.0f;
+                // Shaft
+                dl->AddLine({ arrowBase, cy }, { arrowTip, cy }, col, t);
+                // Arrowhead
+                dl->AddLine({ arrowTip, cy }, { arrowTip + 3.5f, cy - 3.0f }, col, t);
+                dl->AddLine({ arrowTip, cy }, { arrowTip + 3.5f, cy + 3.0f }, col, t);
+            }
 
             if (ImGui::IsItemHovered()) {
                 m_TitleBarHovered = false;
-                ImGui::SetTooltip(m_ChatPanelVisible ? "Hide chat panel" : "Show chat panel");
+                ImGui::SetTooltip("Logout");
             }
         }
 
-        // Spring spacers for layout (keep existing Mac-compatible positioning)
-        Spring(-1.0f, 15.0f);
-        Spring(-1.0f, 18.0f);
+        // ── Status dot click area ────────────────────────────────────────────
+        if (m_CachedShowDot) {
+            // Convert screen-space dot center to overlay-local coords
+            const float dotLocalX = m_CachedDotCx - tbMin.x;
+            const float dotLocalY = m_CachedDotCy - tbMin.y;
+            const float hitSz = 18.0f;
 
-        outTitlebarHeight = titlebarHeight;
+            ImGui::SetCursorPos({
+                dotLocalX - hitSz * 0.5f,
+                dotLocalY - hitSz * 0.5f });
+
+            if (ImGui::InvisibleButton("##StatusDot", { hitSz, hitSz })) {
+                if (m_TitlebarConnected) {
+                    m_UserManualAway = !m_UserManualAway;
+                    if (!m_UserManualAway)
+                        m_LastActivityTime = std::chrono::steady_clock::now();
+                }
+            }
+
+            if (ImGui::IsItemHovered()) {
+                m_TitleBarHovered = false;
+                const bool isAway   = m_TitlebarConnected && !m_TitlebarUserOnline;
+                const bool isOffline = !m_TitlebarConnected;
+                if (isOffline)
+                    ImGui::SetTooltip("Status: Disconnected");
+                else if (isAway)
+                    ImGui::SetTooltip("Status: Away  (click to go online)");
+                else
+                    ImGui::SetTooltip("Status: Online  (click to go away)");
+            }
+        }
+
+        // If mouse is over ANY item in this overlay, disable drag
+        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))
+            m_TitleBarHovered = false;
+
+        ImGui::End();
+        ImGui::PopStyleColor();  // WindowBg
+        ImGui::PopStyleVar(3);   // Padding, BorderSize, Rounding
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -840,7 +988,7 @@ namespace Safira {
         ImGui_ImplVulkanH_Window* wd = &g_MainWindowData;
 
         // Dark clear colour matching the Safira theme background
-        ImVec4 clear_color = ImVec4(0.1f, 0.1f, 0.1f, 1.0f);
+        ImVec4 clear_color = ImVec4(0.14f, 0.14f, 0.14f, 1.0f);
         ImGuiIO& io = ImGui::GetIO();
 
         while (!glfwWindowShouldClose(m_WindowHandle) && m_Running)
@@ -912,8 +1060,9 @@ namespace Safira {
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 3.0f);
 
                 ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4{ 0, 0, 0, 0 });
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{ 0.14f, 0.14f, 0.14f, 1.0f });
                 ImGui::Begin("SafiraMainWindow", nullptr, window_flags);
-                ImGui::PopStyleColor();
+                ImGui::PopStyleColor(2);
                 ImGui::PopStyleVar(2);  // WindowPadding, WindowBorderSize
                 ImGui::PopStyleVar(2);  // WindowRounding, WindowBorderSize(outer)
 
@@ -925,7 +1074,7 @@ namespace Safira {
                     ImGui::PopStyleColor();
                 }
 
-                // Custom titlebar
+                // Custom titlebar - phase 1: background + visuals only
                 if (m_Specification.CustomTitlebar) {
                     float titleBarHeight;
                     UI_DrawTitlebar(titleBarHeight);
@@ -948,6 +1097,12 @@ namespace Safira {
                     layer->OnUIRender();
 
                 ImGui::End(); // SafiraMainWindow
+
+                // Custom titlebar - phase 2: interactive buttons in overlay
+                // This MUST be after all layer windows so it has the highest
+                // z-order and buttons actually receive input.
+                if (m_Specification.CustomTitlebar)
+                    UI_DrawTitlebarButtons();
             }
 
             // ── Render & present ────────────────────────────────────────────

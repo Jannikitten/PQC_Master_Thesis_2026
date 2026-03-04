@@ -12,7 +12,7 @@ std::unique_ptr<Safira::ApplicationGUI> Safira::CreateApplication(int argc, char
     spec.IconPath       = "Safira-Icon.png";
     spec.width          = 800;
     spec.height         = 700;
-    spec.CustomTitlebar = false;
+    spec.CustomTitlebar = true;
     spec.CenterWindow   = true;
 
     auto app = std::make_unique<ApplicationGUI>(spec);

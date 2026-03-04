@@ -84,12 +84,27 @@ public:
     std::string m_TitlebarUserName;
     bool        m_TitlebarUserOnline = false;
     ImTextureID m_TitlebarAvatarTex = {};
+    bool  m_TitlebarConnected  = false;
+    bool  m_UserManualAway     = false;
+    float m_AfkTimeoutSeconds  = 300.0f;  // 5 minutes default
+    std::chrono::steady_clock::time_point m_LastActivityTime
+        = std::chrono::steady_clock::now();
+    std::function<void()> m_OnLogout;
+
+    // ── Titlebar cached state (set by UI_DrawTitlebar, used by UI_DrawTitlebarButtons)
+    ImVec2 m_CachedTbMin  = {};
+    ImVec2 m_CachedTbMax  = {};
+    float  m_CachedTbCenterY = 0.0f;
+    float  m_CachedDotCx  = 0.0f;     // status dot center X (screen)
+    float  m_CachedDotCy  = 0.0f;     // status dot center Y (screen)
+    bool   m_CachedShowDot = false;
 
 private:
     void Init();
     void Shutdown();
 
     void UI_DrawTitlebar(float& outTitlebarHeight);
+    void UI_DrawTitlebarButtons();
     void UI_DrawMenubar();
     void DrawFadedLogo();
 
