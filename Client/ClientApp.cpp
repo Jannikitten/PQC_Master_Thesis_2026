@@ -8,7 +8,7 @@ bool g_ApplicationRunning = true;
 
 std::unique_ptr<Safira::ApplicationGUI> Safira::CreateApplication(int argc, char** argv) {
     ApplicationSpecification spec;
-    spec.name           = "Safira Chat Client";
+    spec.name           = "";
     spec.IconPath       = "Safira-Icon.png";
     spec.width          = 800;
     spec.height         = 700;

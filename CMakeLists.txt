@@ -115,7 +115,13 @@ add_library(CoreLib STATIC
         Core/src/Console.cpp
         Core/src/PrivateChatSession.cpp
         Core/src/ChatPanel.cpp
+        Core/include/MacosWindow.h
 )
+
+# macOS: compile the Objective-C++ native window helper (once, outside the loop)
+if(APPLE)
+        target_sources(CoreLib PRIVATE Core/include/MacOSWindow.mm)
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. Client executable

@@ -4,6 +4,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
 #include "Theme.h"
+#include "MacOSWindow.h"
 #include "imgui_internal.h"
 #include "stb_image.h"
 #include <stdio.h>          // printf, fprintf
@@ -507,6 +508,14 @@ namespace Safira {
         m_IconClose     = LoadEmbeddedIcon(g_WindowCloseIcon,    sizeof(g_WindowCloseIcon));
 
         glfwShowWindow(m_WindowHandle);
+
+        // macOS: hide native title text, make titlebar transparent,
+        // match background colour to the current theme,
+        // and centre the traffic-light buttons in our 48px titlebar.
+        {
+            ImVec4 bg = Theme::Get().ClearColor();
+            MacOS_StyleWindow(m_WindowHandle, bg.x, bg.y, bg.z, 48.0f);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -590,7 +599,12 @@ namespace Safira {
                        Theme::Get().Separator, 1.0f);
 
         // ── Drag detection (mouse-rect only, no InvisibleButton) ────────────
-        m_TitleBarHovered = ImGui::IsMouseHoveringRect(tbMin, tbMax, false);
+        //    Exclude the macOS traffic-light button area from drag hits.
+        {
+            const float trafficW = MacOS_GetTrafficLightWidth(m_WindowHandle);
+            ImVec2 dragMin = { tbMin.x + trafficW, tbMin.y };
+            m_TitleBarHovered = ImGui::IsMouseHoveringRect(dragMin, tbMax, false);
+        }
         if (isMaximized) {
             float mouseY = ImGui::GetMousePos().y - tbMin.y;
             if (mouseY >= 0.0f && mouseY <= 5.0f)
@@ -633,7 +647,10 @@ namespace Safira {
 
         // ── LEFT: User profile — visuals only (avatar, name, dot circle) ────
         {
-            const float leftX = tbMin.x + 12.0f;
+            // On macOS the native close / minimise / zoom buttons sit in the
+            // top-left corner.  Shift our content to the right of them.
+            const float trafficW = MacOS_GetTrafficLightWidth(m_WindowHandle);
+            const float leftX = tbMin.x + (trafficW > 0.0f ? trafficW : 12.0f);
             constexpr float avatarR = 13.0f;
             const float ax = leftX + avatarR;
 
@@ -961,9 +978,38 @@ namespace Safira {
             }
         }
 
-        // If mouse is over ANY item in this overlay, disable drag
-        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))
-            m_TitleBarHovered = false;
+        // ── Window dragging ───────────────────────────────────────────────────
+        //    On macOS, fullSizeContentView breaks GLFW's native hit-test drag.
+        //    We detect a click on the titlebar background (m_TitleBarHovered is
+        //    false when over any button) and hand it off to the system window
+        //    manager via performWindowDragWithEvent — smooth and flicker-free.
+        //    On other platforms, fall back to manual glfwSetWindowPos.
+#ifdef __APPLE__
+        if (m_TitleBarHovered &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            MacOS_BeginNativeDrag(m_WindowHandle);
+        }
+#else
+        {
+            static bool sDragging = false;
+            if (m_TitleBarHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                sDragging = true;
+            if (sDragging) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    ImVec2 delta = ImGui::GetIO().MouseDelta;
+                    if (delta.x != 0.0f || delta.y != 0.0f) {
+                        int wx, wy;
+                        glfwGetWindowPos(m_WindowHandle, &wx, &wy);
+                        glfwSetWindowPos(m_WindowHandle,
+                                         wx + (int)delta.x, wy + (int)delta.y);
+                    }
+                } else {
+                    sDragging = false;
+                }
+            }
+        }
+#endif
 
         ImGui::End();
         ImGui::PopStyleColor();  // WindowBg
@@ -1057,6 +1103,8 @@ namespace Safira {
         while (!glfwWindowShouldClose(m_WindowHandle) && m_Running)
         {
             ImVec4 clear_color = Theme::Get().ClearColor();
+            MacOS_SetWindowColor(m_WindowHandle, clear_color.x, clear_color.y, clear_color.z);
+            MacOS_RepositionTrafficLights(m_WindowHandle, 48.0f);
             glfwPollEvents();
 
             {
