@@ -11,20 +11,58 @@
 // ─────────────────────────────────────────────────────────────────────────────
 static void CenterTrafficLights(NSWindow* nsWin, float titlebarH) {
     NSButton* close = [nsWin standardWindowButton:NSWindowCloseButton];
-    NSButton* mini  = [nsWin standardWindowButton:NSWindowMiniaturizeButton];
-    NSButton* zoom  = [nsWin standardWindowButton:NSWindowZoomButton];
-    if (!close || !mini || !zoom) return;
+    if (!close || !close.superview) return;
 
     NSView* container = close.superview;
-    if (!container) return;
+    NSView* parent    = container.superview;
+    if (!parent) return;
 
-    CGFloat btnH   = close.frame.size.height;       // ~14 pts
-    CGFloat offset = (titlebarH - btnH) * 0.5;      // vertical centring
+    // ── Padding ──────────────────────────────────────────────────
+    constexpr CGFloat padLeft = 8.0;
+    constexpr CGFloat padTop  = 0.0;
+    // ─────────────────────────────────────────────────────────────
 
-    for (NSButton* btn in @[close, mini, zoom]) {
-        NSRect f = btn.frame;
-        f.origin.y = container.frame.size.height - offset - btnH;
-        btn.frame = f;
+    static NSLayoutConstraint* sLeading = nil;
+    static NSLayoutConstraint* sTop     = nil;
+    static bool sSetup = false;
+
+    if (!sSetup) {
+        // Save original size before touching constraints
+        CGFloat origW = container.frame.size.width;
+        CGFloat origH = container.frame.size.height;
+
+        // Remove ALL constraints involving the container from its parent
+        NSMutableArray* toRemove = [NSMutableArray array];
+        for (NSLayoutConstraint* c in parent.constraints) {
+            if (c.firstItem == container || c.secondItem == container)
+                [toRemove addObject:c];
+        }
+        [NSLayoutConstraint deactivateConstraints:toRemove];
+
+        // Switch from autoresizing to explicit constraints
+        container.translatesAutoresizingMaskIntoConstraints = NO;
+
+        // Fully specify position AND size — no ambiguity
+        sLeading = [container.leadingAnchor
+                    constraintEqualToAnchor:parent.leadingAnchor
+                    constant:padLeft];
+
+        CGFloat topVal = (titlebarH - origH) / 2.0 + padTop;
+        sTop = [container.topAnchor
+                constraintEqualToAnchor:parent.topAnchor
+                constant:topVal];
+
+        NSLayoutConstraint* w = [container.widthAnchor
+                                 constraintEqualToConstant:origW];
+        NSLayoutConstraint* h = [container.heightAnchor
+                                 constraintEqualToConstant:origH];
+
+        [NSLayoutConstraint activateConstraints:@[sLeading, sTop, w, h]];
+        sSetup = true;
+    } else {
+        // Update vertical position each frame (handles window resize)
+        CGFloat origH = container.frame.size.height;
+        sTop.constant = (titlebarH - origH) / 2.0 + padTop;
     }
 }
 
@@ -63,7 +101,6 @@ void MacOS_SetWindowColor(GLFWwindow* window, float r, float g, float b) {
 void MacOS_RepositionTrafficLights(GLFWwindow* window, float titlebarHeight) {
     NSWindow* nsWin = (NSWindow*)glfwGetCocoaWindow(window);
     if (!nsWin) return;
-
     CenterTrafficLights(nsWin, titlebarHeight);
 }
 
@@ -91,9 +128,8 @@ float MacOS_GetTrafficLightWidth(GLFWwindow* window) {
     if (zoomBtn) {
         NSRect frame = zoomBtn.frame;
         float rightEdge = (float)(frame.origin.x + frame.size.width);
-        return rightEdge + 12.0f;
+        return rightEdge + 20.0f;  // was 12.0f — increase this for more gap
     }
-
     return 78.0f;
 }
 

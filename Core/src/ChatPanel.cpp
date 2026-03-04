@@ -193,16 +193,17 @@ int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
         float tx = cursor.x + pad;
 
         // Avatar -- use conversation texture if available
+        // FIX 3: Non-lobby avatars use purple (SendBtn) instead of gold (Accent)
         float ax = tx + kAvatarRadius;
         float ay = cursor.y + itemSz.y * 0.5f;
         char letter = c.Title.empty() ? '?' : (char)toupper(c.Title[0]);
 
         ImU32 avatarBg = (i == 0)
             ? Theme::Get().LobbyAvatar
-            : Theme::Get().Accent;
+            : Theme::Get().SendBtn;
 
         DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
-                   avatarBg, Theme::Get().AccentText, c.AvatarTex);
+                   avatarBg, Theme::Get().SendBtnText, c.AvatarTex);
 
         float textX = tx + kAvatarRadius * 2.0f + 10.0f;
 
@@ -284,6 +285,10 @@ void ChatPanel::RenderMessages(std::vector<ChatEntry>& messages,
 // ===========================================================================
 // Bubble
 //
+// FIX 2: Tail corners now use selective corner rounding on the main rect
+//        instead of separate overlapping rects, so border matches perfectly.
+// FIX 3: Peer name and avatar use purple (SendBtn) instead of gold (Accent).
+//
 // In private mode (m_PrivateMode == true):
 //   - Author name is hidden
 //   - Bubble height is reduced (no author line)
@@ -337,44 +342,39 @@ void ChatPanel::DrawBubble(ImDrawList* dl, const ChatEntry& msg,
         : cursor.x + marginX + avatarOffset;
     float bubbleY = cursor.y;
 
-    // Avatar (peer only, NOT in private mode)
+    // Avatar (peer only, NOT in private mode) — uses purple
     if (!isOwn && !m_PrivateMode) {
         float ax = cursor.x + marginX + kAvatarRadius;
         float ay = bubbleY + kAvatarRadius + 2.0f;
         char letter = msg.Who.empty() ? '?' : (char)toupper(msg.Who[0]);
         DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
-                   Theme::Get().Accent, Theme::Get().AccentText, msg.AvatarTex);
+                   Theme::Get().SendBtn, Theme::Get().SendBtnText, msg.AvatarTex);
     }
 
-    // Bubble background
+    // Bubble background — selective corner rounding for tail effect
+    // Own messages: sharp top-right (tail).  Peer messages: sharp top-left (tail).
     ImU32 bubbleCol = isOwn ? Theme::Get().BgOwnBubble : Theme::Get().BgPeerBubble;
+
+    ImDrawFlags cornerFlags = isOwn
+        ? (ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomLeft
+           | ImDrawFlags_RoundCornersBottomRight)
+        : (ImDrawFlags_RoundCornersTopRight | ImDrawFlags_RoundCornersBottomLeft
+           | ImDrawFlags_RoundCornersBottomRight);
+
     dl->AddRectFilled({ bubbleX, bubbleY },
                       { bubbleX + bubbleW, bubbleY + bubbleH },
-                      bubbleCol, kBubbleRounding, ImDrawFlags_RoundCornersAll);
+                      bubbleCol, kBubbleRounding, cornerFlags);
 
-    // Tail corner
-    if (isOwn) {
-        dl->AddRectFilled(
-            { bubbleX + bubbleW - kBubbleRounding, bubbleY },
-            { bubbleX + bubbleW, bubbleY + kBubbleRounding },
-            bubbleCol, 3.0f, ImDrawFlags_RoundCornersTopRight);
-    } else {
-        dl->AddRectFilled(
-            { bubbleX, bubbleY },
-            { bubbleX + kBubbleRounding, bubbleY + kBubbleRounding },
-            bubbleCol, 3.0f, ImDrawFlags_RoundCornersTopLeft);
-    }
-
-    // Border on peer bubbles
+    // Border on peer bubbles — same corner flags so border matches fill exactly
     if (!isOwn)
         dl->AddRect({ bubbleX, bubbleY },
                     { bubbleX + bubbleW, bubbleY + bubbleH },
-                    Theme::Get().Divider, kBubbleRounding, 0, 1.0f);
+                    Theme::Get().Divider, kBubbleRounding, cornerFlags, 1.0f);
 
-    // Author name (skipped in private mode)
+    // Author name (skipped in private mode) — uses purple for peer
     float textY = bubbleY + kBubblePadY;
     if (showAuthor) {
-        ImU32 nameCol = isOwn ? Theme::Get().TextPrimary : Theme::Get().Accent;
+        ImU32 nameCol = isOwn ? Theme::Get().TextPrimary : Theme::Get().SendBtn;
         DrawTextAt(bold, { bubbleX + kBubblePadX, textY }, nameCol, msg.Who.c_str());
         textY += authorH;
     }
@@ -521,7 +521,7 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
             ImGui::PushStyleColor(ImGuiCol_Button,        Theme::Get().DangerBtn);
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  Theme::Get().DangerBtnHover);
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,   Theme::Get().DangerBtnActive);
-            ImGui::PushStyleColor(ImGuiCol_Text,           Theme::Get().AvatarLetterCol);
+            ImGui::PushStyleColor(ImGuiCol_Text,           Theme::Get().DangerBtnText);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { btnPadX, btnPadY });
 
@@ -564,15 +564,16 @@ void ChatPanel::RenderStatusIndicator(bool connected, bool handshaking,
 
 void ChatPanel::RenderInputBar(float areaWidth, const std::string&) {
     float pad = 16.0f;
-    float btnW = 36.0f;
-    float inputW = areaWidth - pad * 2.0f - btnW - 8.0f;
     float inputH = kInputBarHeight - 12.0f;
+    float btnW = inputH;
+    float inputW = areaWidth - pad * 2.0f - btnW - 10.0f;
 
     ImGui::SetCursorPos({ pad, ImGui::GetCursorPosY() + 4.0f });
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 inputPos = ImGui::GetCursorScreenPos();
 
+    // ── Input field background ──────────────────────────────────────────
     dl->AddRectFilled(
         { inputPos.x - 1, inputPos.y - 1 },
         { inputPos.x + inputW + 1, inputPos.y + inputH + 2 },
@@ -584,6 +585,7 @@ void ChatPanel::RenderInputBar(float areaWidth, const std::string&) {
         { inputPos.x + inputW, inputPos.y + inputH },
         Theme::Get().InputBorder, kInputRounding, 0, 1.2f);
 
+    // ── Input text field ────────────────────────────────────────────────
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
         { 14.0f, (inputH - ImGui::GetFontSize()) * 0.5f });
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, kInputRounding);
@@ -608,22 +610,109 @@ void ChatPanel::RenderInputBar(float areaWidth, const std::string&) {
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(3);
 
-    ImGui::SameLine(0.0f, 6.0f);
-    float btnY = ImGui::GetCursorPosY() + (inputH - btnW) * 0.5f;
-    ImGui::SetCursorPosY(btnY);
+    // ── Send button — matches input height, rectangular ─────────────────
+    ImGui::SameLine(0.0f, 8.0f);
 
-    ImGui::PushStyleColor(ImGuiCol_Button,       U32ToVec4(Theme::Get().Accent));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, U32ToVec4(Theme::Get().AccentHover));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  U32ToVec4(Theme::Get().AccentHover));
-    ImGui::PushStyleColor(ImGuiCol_Text,          U32ToVec4(Theme::Get().AccentText));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btnW * 0.5f);
+    // Vertically align button with input field
+    ImGui::SetCursorScreenPos({ ImGui::GetCursorScreenPos().x, inputPos.y });
 
-    bool clicked = ImGui::Button(">", { btnW, btnW });
+    const bool hasText = m_InputBuf[0] != '\0';
+
+    ImU32 btnBg      = hasText ? Theme::Get().SendBtn          : Theme::Get().SendBtnMuted;
+    ImU32 btnHover   = hasText ? Theme::Get().SendBtnHover     : Theme::Get().SendBtnMutedHover;
+    ImU32 btnActive  = hasText ? Theme::Get().SendBtnActive    : Theme::Get().SendBtnMuted;
+    ImU32 btnTextCol = hasText ? Theme::Get().SendBtnText      : Theme::Get().TextMuted;
+
+    ImGui::PushStyleColor(ImGuiCol_Button,        btnBg);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  btnHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   btnActive);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, inputH * 0.5f);
+
+    bool clicked = ImGui::Button("##Send", { btnW, inputH });
 
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor(4);
+    ImGui::PopStyleColor(3);
 
-    if ((submitted || clicked) && m_InputBuf[0] != '\0') {
+    // ── Draw HD paper plane icon ────────────────────────────────────────
+    // High-detail paper plane drawn with anti-aliased polygons and lines.
+    // Uses the send button purple tones for a cohesive look.
+    {
+        const ImVec2 bMin = ImGui::GetItemRectMin();
+        const ImVec2 bMax = ImGui::GetItemRectMax();
+        const float cx = (bMin.x + bMax.x) * 0.5f;
+        const float cy = (bMin.y + bMax.y) * 0.5f;
+        const bool hovered = ImGui::IsItemHovered();
+
+        // Icon colour — white when active, muted when empty
+        ImU32 iconCol = btnTextCol;
+        if (hovered && hasText)
+            iconCol = Theme::Get().SendBtnText;
+
+        const float s = 10.0f; // half-size — larger for HD clarity
+
+        // ── Paper plane geometry (tilted ~15° for dynamism) ─────────
+        //
+        //          tip
+        //         / |  \
+        //        /  |    \
+        //    topL   |      \
+        //        \  mid      \
+        //         \ |  \       \
+        //       botL    tail     nose
+        //
+        // Upper body: tip → topL → mid (bright)
+        // Lower body: tip → mid → botL (darker)
+        // Fuselage crease: mid → tail (line)
+
+        // Main vertices — offset slightly right for visual balance
+        const float ox = cx + 1.0f;
+        ImVec2 tip   = { ox + s,          cy };                // right nose
+        ImVec2 topL  = { ox - s,          cy - s * 0.85f };   // top-left wing
+        ImVec2 botL  = { ox - s,          cy + s * 0.85f };   // bottom-left wing
+        ImVec2 mid   = { ox - s * 0.05f,  cy };               // centre crease point
+        ImVec2 tail  = { ox - s * 0.40f,  cy + s * 0.50f };   // fold tail
+
+        // ── Upper wing (bright) ─────────────────────────────────────
+        ImVec2 upperPoly[3] = { tip, topL, mid };
+        dl->AddConvexPolyFilled(upperPoly, 3, iconCol);
+
+        // ── Lower wing (darker for depth) ───────────────────────────
+        ImU32 wingDark;
+        {
+            ImVec4 c = ImGui::ColorConvertU32ToFloat4(iconCol);
+            c.x *= 0.68f; c.y *= 0.68f; c.z *= 0.68f;
+            wingDark = ImGui::ColorConvertFloat4ToU32(c);
+        }
+        ImVec2 lowerPoly[3] = { tip, mid, botL };
+        dl->AddConvexPolyFilled(lowerPoly, 3, wingDark);
+
+        // ── Wing edge highlights (thin anti-aliased lines) ──────────
+        // Top wing leading edge
+        ImU32 edgeHighlight;
+        {
+            ImVec4 c = ImGui::ColorConvertU32ToFloat4(iconCol);
+            c.w *= 0.45f;
+            edgeHighlight = ImGui::ColorConvertFloat4ToU32(c);
+        }
+        dl->AddLine(topL, tip, edgeHighlight, 1.0f);
+        dl->AddLine(botL, tip, edgeHighlight, 1.0f);
+
+        // ── Fuselage crease — from centre to tail ───────────────────
+        dl->AddLine(mid, tail, iconCol, 1.5f);
+
+        // ── Inner fold line — subtle detail from mid toward top-left ─
+        ImVec2 innerFold = { ox - s * 0.55f, cy - s * 0.25f };
+        ImU32 foldCol;
+        {
+            ImVec4 c = ImGui::ColorConvertU32ToFloat4(iconCol);
+            c.w *= 0.30f;
+            foldCol = ImGui::ColorConvertFloat4ToU32(c);
+        }
+        dl->AddLine(mid, innerFold, foldCol, 1.0f);
+    }
+
+    // ── Submit handling ─────────────────────────────────────────────────
+    if ((submitted || clicked) && hasText) {
         std::string text(m_InputBuf);
         m_InputBuf[0] = '\0';
         m_FocusInput = true;

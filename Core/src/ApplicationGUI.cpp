@@ -587,13 +587,16 @@ namespace Safira {
         };
 
         // Cache for phase 2
-        m_CachedTbMin    = tbMin;
-        m_CachedTbMax    = tbMax;
-        m_CachedTbCenterY = tbMin.y + titlebarHeight * 0.5f;
+        // The overlay and centering should span from the actual window top
+        // edge (not offset by WindowPadding) to the separator line.
+        const float windowTopY = tbMin.y - wPad.y;
+        m_CachedTbMin     = { tbMin.x, windowTopY };
+        m_CachedTbMax     = tbMax;
+        m_CachedTbCenterY = (windowTopY + tbMax.y) * 0.5f;
         m_CachedShowDot  = false;
 
         auto* bgDl = ImGui::GetBackgroundDrawList();
-        bgDl->AddRectFilled(tbMin, tbMax, Theme::Get().BgTitlebar);
+        bgDl->AddRectFilled({ tbMin.x, tbMin.y - wPad.y }, tbMax, Theme::Get().BgTitlebar);
         // Separator line between titlebar and content below
         bgDl->AddLine({ tbMin.x, tbMax.y }, { tbMax.x, tbMax.y },
                        Theme::Get().Separator, 1.0f);
@@ -712,6 +715,25 @@ namespace Safira {
         outTitlebarHeight = titlebarHeight;
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Styled tooltip — matches the right-click context menu appearance
+    // ─────────────────────────────────────────────────────────────────────
+    static void StyledTooltip(const char* text) {
+        ImGui::PushStyleColor(ImGuiCol_PopupBg,    Theme::Get().BgPopupAlt);
+        ImGui::PushStyleColor(ImGuiCol_Border,     Theme::Get().ModalBorder);
+        ImGui::PushStyleColor(ImGuiCol_Text,       Theme::Get().TextPrimary);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,  6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,   { 10.0f, 6.0f });
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(text);
+        ImGui::EndTooltip();
+
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(3);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // UI_DrawTitlebarButtons — Phase 2: transparent overlay with buttons.
     //
@@ -801,7 +823,7 @@ namespace Safira {
         }
         if (ImGui::IsItemHovered()) {
             m_TitleBarHovered = false;
-            ImGui::SetTooltip(m_ChatPanelVisible
+            StyledTooltip(m_ChatPanelVisible
                 ? "Hide chat panel" : "Show chat panel");
         }
 
@@ -876,7 +898,7 @@ namespace Safira {
 
             if (ImGui::IsItemHovered()) {
                 m_TitleBarHovered = false;
-                ImGui::SetTooltip("Logout");
+                StyledTooltip("Logout");
             }
 
             // ── Theme toggle button (left of logout) ────────────────────────
@@ -941,7 +963,7 @@ namespace Safira {
 
             if (ImGui::IsItemHovered()) {
                 m_TitleBarHovered = false;
-                ImGui::SetTooltip(Theme::IsDark()
+                StyledTooltip(Theme::IsDark()
                     ? "Switch to light mode" : "Switch to dark mode");
             }
         }
@@ -970,11 +992,11 @@ namespace Safira {
                 const bool isAway   = m_TitlebarConnected && !m_TitlebarUserOnline;
                 const bool isOffline = !m_TitlebarConnected;
                 if (isOffline)
-                    ImGui::SetTooltip("Status: Disconnected");
+                    StyledTooltip("Status: Disconnected");
                 else if (isAway)
-                    ImGui::SetTooltip("Status: Away  (click to go online)");
+                    StyledTooltip("Status: Away  (click to go online)");
                 else
-                    ImGui::SetTooltip("Status: Online  (click to go away)");
+                    StyledTooltip("Status: Online  (click to go away)");
             }
         }
 
@@ -984,31 +1006,41 @@ namespace Safira {
         //    false when over any button) and hand it off to the system window
         //    manager via performWindowDragWithEvent — smooth and flicker-free.
         //    On other platforms, fall back to manual glfwSetWindowPos.
+        // NEW — drag from titlebar OR any empty background
 #ifdef __APPLE__
-        if (m_TitleBarHovered &&
-            ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
-            MacOS_BeginNativeDrag(m_WindowHandle);
-        }
-#else
-        {
-            static bool sDragging = false;
-            if (m_TitleBarHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-                sDragging = true;
-            if (sDragging) {
-                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                    ImVec2 delta = ImGui::GetIO().MouseDelta;
-                    if (delta.x != 0.0f || delta.y != 0.0f) {
-                        int wx, wy;
-                        glfwGetWindowPos(m_WindowHandle, &wx, &wy);
-                        glfwSetWindowPos(m_WindowHandle,
-                                         wx + (int)delta.x, wy + (int)delta.y);
-                    }
-                } else {
-                    sDragging = false;
-                }
+            bool canDrag = !ImGui::IsAnyItemActive()
+                        && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+
+            if (canDrag && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            {
+                MacOS_BeginNativeDrag(m_WindowHandle);
             }
         }
+#else
+{
+    static bool sDragging = false;
+
+    bool canDrag = !ImGui::IsAnyItemActive()
+                && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+
+    if (canDrag && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        sDragging = true;
+
+    if (sDragging) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            ImVec2 delta = ImGui::GetIO().MouseDelta;
+            if (delta.x != 0.0f || delta.y != 0.0f) {
+                int wx, wy;
+                glfwGetWindowPos(m_WindowHandle, &wx, &wy);
+                glfwSetWindowPos(m_WindowHandle,
+                                 wx + (int)delta.x, wy + (int)delta.y);
+            }
+        } else {
+            sDragging = false;
+        }
+    }
+}
 #endif
 
         ImGui::End();

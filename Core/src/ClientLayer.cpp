@@ -877,6 +877,17 @@ void ClientLayer::UI_UnifiedChatWindow() {
         ImGui::EndChild(); // ConvoList
     }
     ImGui::EndChild(); // Sidebar
+
+    // Draw vertical separator on top of sidebar's right edge
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();  // ##ChatPanel's draw list
+        ImVec2 sidebarEnd = ImGui::GetCursorScreenPos();
+        float panelTop = sidebarEnd.y - avail.y;
+        dl->AddLine({ sidebarEnd.x, panelTop },
+                    { sidebarEnd.x, panelTop + avail.y },
+                    Theme::Get().Separator, 1.0f);
+    }
+
     ImGui::PopStyleColor();
 
     // -- Right chat area -----------------------------------------------------
@@ -974,25 +985,44 @@ void ClientLayer::UI_UnifiedChatWindow() {
     ImGui::PopStyleColor();
 
     // ── Separator lines ─────────────────────────────────────────────────
-    // Use the foreground draw list so lines render ON TOP of child windows.
-    // Skip when any modal popup is open (connection, invite, report) so
-    // lines don't bleed through them.
+    // Draw using a transparent overlay window so lines sit ON TOP of child
+    // windows but BELOW tooltips (unlike GetForegroundDrawList which covers
+    // everything).
     const bool anyModalOpen = !IsConnected()
         || !m_IncomingInvites.empty()
         || ImGui::IsPopupOpen("Report User##ReportModal");
     if (!anyModalOpen) {
-        ImDrawList* dl = ImGui::GetForegroundDrawList();
         ImVec2 origin = ImGui::GetWindowPos();
         const ImU32 lineCol = Theme::Get().Separator;
 
-        // Horizontal line at top (separates titlebar from panels)
-        dl->AddLine(origin, { origin.x + avail.x, origin.y },
-                    lineCol, 1.0f);
+        ImGui::SetNextWindowPos(origin);
+        ImGui::SetNextWindowSize({ avail.x, avail.y });
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
 
-        // Vertical line between sidebar and chat area
-        dl->AddLine({ origin.x + sideW, origin.y },
-                    { origin.x + sideW, origin.y + avail.y },
-                    lineCol, 1.0f);
+        ImGuiWindowFlags lineFlags =
+              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoResize     | ImGuiWindowFlags_NoNav
+            | ImGuiWindowFlags_NoDocking    | ImGuiWindowFlags_NoInputs
+            | ImGuiWindowFlags_NoFocusOnAppearing
+            | ImGuiWindowFlags_NoSavedSettings;
+
+        if (ImGui::Begin("##SeparatorOverlay", nullptr, lineFlags)) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Horizontal line at top
+            dl->AddLine(origin, { origin.x + avail.x, origin.y },
+                        lineCol, 1.0f);
+
+            // Vertical line between sidebar and chat area
+            dl->AddLine({ origin.x + sideW, origin.y },
+                        { origin.x + sideW, origin.y + avail.y },
+                        lineCol, 1.0f);
+        }
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
     }
 
     ImGui::EndChild(); // ##ChatPanel

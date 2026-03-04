@@ -90,6 +90,15 @@ struct ThemeData {
     ImU32 DangerBtn;
     ImU32 DangerBtnHover;
     ImU32 DangerBtnActive;
+    ImU32 DangerBtnText;         // Text on danger button
+
+    // ── Buttons — send ───────────────────────────────────────────────────
+    ImU32 SendBtn;
+    ImU32 SendBtnHover;
+    ImU32 SendBtnActive;
+    ImU32 SendBtnText;
+    ImU32 SendBtnMuted;
+    ImU32 SendBtnMutedHover;
 
     // ── Buttons — decline / cancel ───────────────────────────────────────
     ImU32 DeclineBtn;
@@ -177,7 +186,7 @@ inline ThemeData DarkPalette() {
     t.AccentFaded       = IM_COL32(218, 185, 107,  32);
     t.AccentRing        = IM_COL32(218, 185, 107,  28);
     t.AccentRingInner   = IM_COL32(218, 185, 107,  14);
-    t.LobbyAvatar       = IM_COL32( 80, 120, 170, 255);
+    t.LobbyAvatar       = IM_COL32(118, 110, 215, 255);
 
     // Text
     t.TextPrimary       = IM_COL32(210, 210, 210, 255);
@@ -203,6 +212,15 @@ inline ThemeData DarkPalette() {
     t.DangerBtn         = IM_COL32(140,  50,  50, 200);
     t.DangerBtnHover    = IM_COL32(180,  60,  60, 230);
     t.DangerBtnActive   = IM_COL32(200,  70,  70, 255);
+    t.DangerBtnText     = IM_COL32(255, 255, 255, 255);
+
+    // Send button (lighter blue-purple for dark mode)
+    t.SendBtn           = IM_COL32(118, 110, 215, 255);
+    t.SendBtnHover      = IM_COL32(140, 132, 235, 255);
+    t.SendBtnActive     = IM_COL32(100,  92, 188, 255);
+    t.SendBtnText       = IM_COL32(255, 255, 255, 255);
+    t.SendBtnMuted      = IM_COL32( 55,  55,  60, 255);
+    t.SendBtnMutedHover = IM_COL32( 65,  65,  70, 255);
 
     // Decline buttons
     t.DeclineBtn        = IM_COL32( 60,  60,  60, 200);
@@ -221,8 +239,8 @@ inline ThemeData DarkPalette() {
     t.ScrollGrabHover   = IM_COL32(255, 255, 255,  55);
     t.ScrollGrabActive  = IM_COL32(255, 255, 255,  80);
 
-    // Toggle icon
-    t.ToggleIconActive  = IM_COL32(218, 185, 107, 230);
+    // Toggle icon (matches send button purple)
+    t.ToggleIconActive  = IM_COL32(118, 110, 215, 230);
     t.ToggleIconInactive= IM_COL32(140, 140, 140, 130);
 
     // Misc
@@ -279,7 +297,7 @@ inline ThemeData LightPalette() {
     t.AccentFaded       = IM_COL32(178, 142,  58,  25);
     t.AccentRing        = IM_COL32(178, 142,  58,  35);
     t.AccentRingInner   = IM_COL32(178, 142,  58,  18);
-    t.LobbyAvatar       = IM_COL32( 60, 100, 160, 255);
+    t.LobbyAvatar       = IM_COL32( 95,  85, 200, 255);
 
     // Text
     t.TextPrimary       = IM_COL32( 28,  28,  30, 255);
@@ -301,10 +319,19 @@ inline ThemeData LightPalette() {
     t.GhostBtnHover    = IM_COL32(  0,   0,   0,  15);
     t.GhostBtnActive   = IM_COL32(  0,   0,   0,  30);
 
-    // Danger buttons (leave)
-    t.DangerBtn         = IM_COL32(190,  55,  55, 210);
-    t.DangerBtnHover    = IM_COL32(210,  65,  65, 240);
-    t.DangerBtnActive   = IM_COL32(225,  75,  75, 255);
+    // Danger buttons (leave) — distinct light style
+    t.DangerBtn         = IM_COL32(220,  60,  60, 225);
+    t.DangerBtnHover    = IM_COL32(235,  75,  75, 245);
+    t.DangerBtnActive   = IM_COL32(245,  85,  85, 255);
+    t.DangerBtnText     = IM_COL32(255, 255, 255, 255);
+
+    // Send button (blue-purple)
+    t.SendBtn           = IM_COL32( 95,  85, 200, 255);
+    t.SendBtnHover      = IM_COL32(115, 105, 225, 255);
+    t.SendBtnActive     = IM_COL32( 80,  70, 175, 255);
+    t.SendBtnText       = IM_COL32(255, 255, 255, 255);
+    t.SendBtnMuted      = IM_COL32(215, 215, 220, 255);
+    t.SendBtnMutedHover = IM_COL32(200, 200, 208, 255);
 
     // Decline buttons
     t.DeclineBtn        = IM_COL32(180, 180, 185, 220);
@@ -323,8 +350,8 @@ inline ThemeData LightPalette() {
     t.ScrollGrabHover   = IM_COL32(  0,   0,   0,  50);
     t.ScrollGrabActive  = IM_COL32(  0,   0,   0,  75);
 
-    // Toggle icon
-    t.ToggleIconActive  = IM_COL32(178, 142,  58, 240);
+    // Toggle icon (matches send button purple)
+    t.ToggleIconActive  = IM_COL32( 95,  85, 200, 240);
     t.ToggleIconInactive= IM_COL32(130, 130, 135, 160);
 
     // Misc
