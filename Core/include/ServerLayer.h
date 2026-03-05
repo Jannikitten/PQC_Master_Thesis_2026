@@ -27,8 +27,11 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
+#include <mutex>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -81,6 +84,8 @@ private:
     void SendServerShutdownToAllClients  ();
     void SendClientKick                  (const Safira::ClientInfo& clientInfo, std::string_view reason);
     void SendChatMessage                 (std::string_view message);
+    void EnqueueEvent(std::function<void()>&& fn);
+    void DrainQueuedEvents();
 
     // ── Commands ────────────────────────────────────────────────────────────
     void OnCommand(std::string_view command);
@@ -107,9 +112,11 @@ private:
     std::vector<uint8_t>            m_ScratchBuffer;
 
     std::unordered_map<Safira::ClientID, Safira::UserInfo> m_ConnectedClients;
-    std::unordered_map<std::string, Safira::ClientID>      m_PendingPrivateChatInvites;
+    std::unordered_map<Safira::ClientID, Safira::ClientID> m_PendingPrivateChatInvites; // responder -> initiator
     std::unordered_map<Safira::ClientID, RateLimitEntry>   m_RateLimitState;
     std::unordered_set<std::string>                        m_MutedUsers;
+    std::mutex                                             m_EventMutex;
+    std::queue<std::function<void()>>                      m_PendingEvents;
 
     std::string m_Motd;
 

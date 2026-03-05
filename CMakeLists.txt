@@ -106,6 +106,7 @@ add_library(CoreLib STATIC
         Core/src/ConsoleGUI.cpp
         Core/src/Log.cpp
         Core/src/Input.cpp
+        Core/src/NetworkExecutor.cpp
         Core/src/Client.cpp
         Core/src/UserInfo.cpp
         Core/src/ServerPacket.cpp
@@ -115,6 +116,8 @@ add_library(CoreLib STATIC
         Core/src/Console.cpp
         Core/src/PrivateChatSession.cpp
         Core/src/ChatPanel.cpp
+        Core/src/NetworkExecutor.cpp
+        Core/include/NetworkExecutor.h
 )
 
 # macOS: compile the Objective-C++ native window helper (once, outside the loop)

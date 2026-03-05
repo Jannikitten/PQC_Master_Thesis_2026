@@ -16,15 +16,16 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Types.h"
+#include "NetworkExecutor.h"
 #include "WolfTypes.h"
 
 #include <atomic>
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <variant>
 #include <vector>
 
@@ -49,6 +50,7 @@ enum class ClientError : uint8_t {
     SocketCreation,
     SocketConnect,
     ContextInit,
+    TrustStoreLoad,
     SessionCreation,
     HandshakeInit,
 };
@@ -60,6 +62,7 @@ enum class ClientError : uint8_t {
         case ClientError::SocketCreation:  return "failed to create UDP socket";
         case ClientError::SocketConnect:   return "UDP connect() failed";
         case ClientError::ContextInit:     return "wolfSSL_CTX_new failed";
+        case ClientError::TrustStoreLoad:  return "failed to load trusted server certificate";
         case ClientError::SessionCreation: return "wolfSSL_new failed";
         case ClientError::HandshakeInit:   return "wolfSSL_connect initiation failed";
     }
@@ -92,6 +95,10 @@ struct ClientResources {
     WolfSession  SSL;
 };
 
+struct PendingClientSend {
+    std::vector<uint8_t> Data;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Client
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +125,7 @@ public:
     /// Suppresses close_notify to avoid stale packets.
     void RequestDisconnect() noexcept {
         m_Running.store(false, std::memory_order_release);
-        m_SuppressShutdown = true;
+        m_SuppressShutdown.store(true, std::memory_order_release);
     }
 
     [[nodiscard]] bool IsConnected() const noexcept {
@@ -128,7 +135,8 @@ public:
     [[nodiscard]] ConnectionStatus GetConnectionStatus() const noexcept {
         return m_ConnectionStatus.load(std::memory_order_acquire);
     }
-    [[nodiscard]] const std::string& GetConnectionDebugMessage() const noexcept {
+    [[nodiscard]] std::string GetConnectionDebugMessage() const {
+        std::lock_guard lock(m_StateMutex);
         return m_ConnectionDebugMessage;
     }
 
@@ -166,6 +174,8 @@ private:
     // §3.4 Typestate dispatch
     void DriveHandshake();
     void DriveConnected();
+    void DrainSendQueue();
+    void DoSend(ByteSpan buf);
 
     void OnFatalError(std::string_view msg);
 
@@ -181,10 +191,11 @@ private:
 
     int               m_Socket = -1;
     std::atomic<bool> m_Running { false };
-    std::thread       m_NetworkThread;
+    NetworkExecutor   m_NetworkExecutor;
 
     std::atomic<ConnectionStatus> m_ConnectionStatus { ConnectionStatus::Disconnected };
     std::string                   m_ConnectionDebugMessage;
+    mutable std::mutex            m_StateMutex;
 
     WolfContext  m_Ctx;
     WolfSession  m_SSL;
@@ -192,9 +203,11 @@ private:
     // §3.4 — replaces the old bool m_HandshakeFinished.
     ConnectionPhase m_Phase { Handshaking{} };
 
-    bool m_SuppressShutdown = false;
+    std::atomic<bool> m_SuppressShutdown { false };
 
     std::vector<uint8_t> m_IncomingEncryptedBuffer;
+    mutable std::mutex              m_SendMutex;
+    std::vector<PendingClientSend>  m_SendQueue;
 
     DataReceivedCallback       m_OnDataReceived;
     ServerConnectedCallback    m_OnServerConnected;

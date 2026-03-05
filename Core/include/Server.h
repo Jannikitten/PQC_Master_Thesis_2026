@@ -24,6 +24,7 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include "Common.h"
+#include "NetworkExecutor.h"
 #include "Types.h"
 #include "WolfTypes.h"
 
@@ -37,7 +38,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -254,7 +254,7 @@ private:
     // ── State ────────────────────────────────────────────────────────────────
     int               m_Socket = -1;
     std::atomic<bool> m_Running { false };
-    std::thread       m_NetworkThread;
+    NetworkExecutor   m_NetworkExecutor;
 
     WolfContext m_Ctx;
 

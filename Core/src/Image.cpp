@@ -157,11 +157,13 @@ namespace Safira {
 
 	void Image::Release()
 	{
-		ApplicationGUI::SubmitResourceFree([sampler = m_Sampler, imageView = m_ImageView, image = m_Image,
+		ApplicationGUI::SubmitResourceFree([descriptorSet = m_DescriptorSet, sampler = m_Sampler, imageView = m_ImageView, image = m_Image,
 			memory = m_Memory, stagingBuffer = m_StagingBuffer, stagingBufferMemory = m_StagingBufferMemory]()
 		{
 			VkDevice device = ApplicationGUI::GetDevice();
 
+			if (descriptorSet)
+				ImGui_ImplVulkan_RemoveTexture(descriptorSet);
 			vkDestroySampler(device, sampler, nullptr);
 			vkDestroyImageView(device, imageView, nullptr);
 			vkDestroyImage(device, image, nullptr);
@@ -176,6 +178,7 @@ namespace Safira {
 		m_Memory = nullptr;
 		m_StagingBuffer = nullptr;
 		m_StagingBufferMemory = nullptr;
+		m_DescriptorSet = nullptr;
 	}
 
 	void Image::SetData(const void* data)
@@ -299,4 +302,3 @@ namespace Safira {
     	return data;
     }
 }
-

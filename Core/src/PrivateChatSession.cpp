@@ -13,9 +13,16 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cerrno>
+#include <filesystem>
+#include <fstream>
 #include <format>
+#include <mutex>
 #include <ranges>
+#include <sstream>
+#include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 #include <botan/auto_rng.h>
 #include <botan/certstor.h>
@@ -39,6 +46,71 @@
 #include <spdlog/spdlog.h>
 
 namespace Safira {
+
+namespace {
+enum class PinVerificationStatus : uint8_t {
+    Match,
+    TrustedFirstUse,
+    Mismatch,
+};
+
+struct PinVerificationResult {
+    PinVerificationStatus Status = PinVerificationStatus::Mismatch;
+    std::string Fingerprint;
+};
+
+[[nodiscard]] std::filesystem::path GetPeerPinStorePath() {
+    return GetSafiraDataDir() / "KnownPeerFingerprints.txt";
+}
+
+[[nodiscard]] std::unordered_map<std::string, std::string> LoadPeerPins() {
+    std::unordered_map<std::string, std::string> pins;
+    std::ifstream in(GetPeerPinStorePath());
+    if (!in)
+        return pins;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::istringstream iss(line);
+        std::string user;
+        std::string fp;
+        if (!(iss >> user >> fp))
+            continue;
+        pins[user] = fp;
+    }
+    return pins;
+}
+
+void SavePeerPins(const std::unordered_map<std::string, std::string>& pins) {
+    const auto path = GetPeerPinStorePath();
+    std::ofstream out(path, std::ios::trunc);
+    for (const auto& [user, fp] : pins)
+        out << user << ' ' << fp << '\n';
+    out.flush();
+    HardenFilePermissions(path);
+}
+
+[[nodiscard]] PinVerificationResult VerifyOrTrustPeerFingerprint(const std::string& peerUsername,
+                                                                 const std::string& fingerprint) {
+    static std::mutex s_PinMutex;
+    std::lock_guard lock(s_PinMutex);
+
+    auto pins = LoadPeerPins();
+    if (const auto it = pins.find(peerUsername); it != pins.end()) {
+        return {
+            .Status = (it->second == fingerprint)
+                ? PinVerificationStatus::Match
+                : PinVerificationStatus::Mismatch,
+            .Fingerprint = it->second,
+        };
+    }
+
+    pins[peerUsername] = fingerprint;
+    SavePeerPins(pins);
+    return { .Status = PinVerificationStatus::TrustedFirstUse, .Fingerprint = fingerprint };
+}
+} // namespace
 
 // ═════════════════════════════════════════════════════════════════════════════
 // UniqueSocket
@@ -197,19 +269,44 @@ public:
         m_Owner.AppendMessage("System",
             std::format("Connected to {} (Botan TLS 1.3 | X25519/ML-KEM-768)", m_PeerUsername),
             0xFF66CC66);
+        if (m_FirstUseTrusted) {
+            m_Owner.AppendMessage("System",
+                std::format("First trusted fingerprint for {}: {}", m_PeerUsername, m_FirstUseFingerprint),
+                0xFFCCAA66);
+        }
         m_Activated = true;
     }
 
-    // Phase 1: accept any cert without verification.
-    // TODO Phase 2: remove this and provide a real trust store.
     void tls_verify_cert_chain(
-        const std::vector<Botan::X509_Certificate>&,
+        const std::vector<Botan::X509_Certificate>& cert_chain,
         const std::vector<std::optional<Botan::OCSP::Response>>&,
         const std::vector<Botan::Certificate_Store*>&,
         Botan::Usage_Type,
         std::string_view,
         const Botan::TLS::Policy&) override
-    {}
+    {
+        if (cert_chain.empty())
+            throw std::runtime_error("empty peer certificate chain");
+
+        const std::string expectedCN = SanitizeIdentityName(m_PeerUsername);
+        const std::string certCN = cert_chain.front().subject_dn().get_first_attribute("X520.CommonName");
+        if (certCN.empty())
+            throw std::runtime_error("peer certificate missing common name");
+        if (certCN != expectedCN) {
+            throw std::runtime_error(
+                std::format("peer identity mismatch (expected '{}', got '{}')", expectedCN, certCN));
+        }
+
+        const std::string fp = cert_chain.front().fingerprint("SHA-256");
+        const auto pinResult = VerifyOrTrustPeerFingerprint(m_PeerUsername, fp);
+        if (pinResult.Status == PinVerificationStatus::Mismatch)
+            throw std::runtime_error("peer certificate fingerprint mismatch");
+        if (pinResult.Status == PinVerificationStatus::TrustedFirstUse) {
+            m_FirstUseTrusted = true;
+            m_FirstUseFingerprint = fp;
+            spdlog::warn("[P2P] First-use trust for {} fingerprint {}", m_PeerUsername, fp);
+        }
+    }
 
     [[nodiscard]] bool IsActivated()           const noexcept { return m_Activated; }
     [[nodiscard]] bool IsCloseNotifyReceived() const noexcept { return m_CloseNotifyReceived; }
@@ -220,6 +317,8 @@ private:
     std::string         m_PeerUsername;
     bool                m_Activated           = false;
     bool                m_CloseNotifyReceived = false;
+    bool                m_FirstUseTrusted     = false;
+    std::string         m_FirstUseFingerprint;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,7 +388,8 @@ PrivateChatSession::CreateAndConnectSocket(std::string_view ip, uint16_t port) {
         .sin_addr   = {},
         .sin_zero   = {},
     };
-    ::inet_pton(AF_INET, std::string(ip).c_str(), &server.sin_addr);
+    if (::inet_pton(AF_INET, std::string(ip).c_str(), &server.sin_addr) != 1)
+        return std::unexpected(P2PError::AddressParse);
 
     if (::connect(sock.Get(), reinterpret_cast<sockaddr*>(&server), sizeof(server)) < 0)
         return std::unexpected(P2PError::TcpConnect);
@@ -301,8 +401,9 @@ PrivateChatSession::CreateAndConnectSocket(std::string_view ip, uint16_t port) {
 // Ctor / Dtor
 // ═════════════════════════════════════════════════════════════════════════════
 
-PrivateChatSession::PrivateChatSession(std::string peer)
-    : m_PeerUsername(std::move(peer)) {}
+PrivateChatSession::PrivateChatSession(std::string own, std::string peer)
+    : m_PeerUsername(std::move(peer))
+    , m_OwnUsername(std::move(own)) {}
 
 PrivateChatSession::~PrivateChatSession() { Close(); }
 
@@ -314,6 +415,12 @@ PrivateChatSession::~PrivateChatSession() { Close(); }
 // ═════════════════════════════════════════════════════════════════════════════
 
 uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
+    if (m_Running.load(std::memory_order_acquire)) {
+        spdlog::warn("[P2P] StartAsResponder called while already running");
+        return 0;
+    }
+    m_NetworkExecutor.Stop();
+
     auto listenResult = CreateListenSocket();
     if (!listenResult) {
         spdlog::error("[P2P] Responder: {}", Describe(listenResult.error()));
@@ -335,7 +442,19 @@ uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
         0xFF888888);
 
     m_Running.store(true, std::memory_order_release);
-    m_Thread = std::thread([this, keyType] { ResponderThreadFunc(keyType); });
+    if (!m_NetworkExecutor.Start("p2p-session")) {
+        spdlog::error("[P2P] failed to start network executor");
+        m_Running.store(false, std::memory_order_release);
+        m_Socket.Reset();
+        return 0;
+    }
+    if (!m_NetworkExecutor.Post([this, keyType] { ResponderThreadFunc(keyType); })) {
+        spdlog::error("[P2P] failed to schedule responder loop");
+        m_Running.store(false, std::memory_order_release);
+        m_Socket.Reset();
+        m_NetworkExecutor.Stop();
+        return 0;
+    }
     return port;
 }
 
@@ -344,10 +463,25 @@ uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void PrivateChatSession::StartAsInitiator(std::string_view peerAddress) {
+    if (m_Running.load(std::memory_order_acquire)) {
+        spdlog::warn("[P2P] StartAsInitiator called while already running");
+        return;
+    }
+    m_NetworkExecutor.Stop();
+
     m_Running.store(true, std::memory_order_release);
-    m_Thread = std::thread([this, addr = std::string(peerAddress)] {
+    if (!m_NetworkExecutor.Start("p2p-session")) {
+        spdlog::error("[P2P] failed to start network executor");
+        m_Running.store(false, std::memory_order_release);
+        return;
+    }
+    if (!m_NetworkExecutor.Post([this, addr = std::string(peerAddress)] {
         InitiatorThreadFunc(addr);
-    });
+    })) {
+        spdlog::error("[P2P] failed to schedule initiator loop");
+        m_Running.store(false, std::memory_order_release);
+        m_NetworkExecutor.Stop();
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -356,8 +490,8 @@ void PrivateChatSession::StartAsInitiator(std::string_view peerAddress) {
 
 void PrivateChatSession::Close() {
     m_Running.store(false, std::memory_order_release);
-    if (m_Thread.joinable()) m_Thread.join();
     m_Socket.Reset();
+    m_NetworkExecutor.Stop();
     m_Connected.store(false, std::memory_order_release);
 }
 
@@ -379,23 +513,39 @@ void PrivateChatSession::Send(std::string_view message) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
-    // Accept one connection, then close the listen socket.
-    // The listen socket is currently owned by m_Socket.  We release it
-    // into a local UniqueSocket so accept() runs on it, then m_Socket
-    // takes ownership of the connection socket.
-    UniqueSocket listenSock = std::move(m_Socket);
+    const int listenFd = m_Socket.Get();
+    if (listenFd < 0) {
+        m_Running.store(false, std::memory_order_release);
+        return;
+    }
+    ::fcntl(listenFd, F_SETFL, O_NONBLOCK);
 
     sockaddr_in peer{};
     socklen_t peerLen = sizeof(peer);
-    const int connFd = ::accept(listenSock.Get(),
-                                reinterpret_cast<sockaddr*>(&peer), &peerLen);
-    listenSock.Reset();  // done listening
+    int connFd = -1;
+
+    while (m_Running.load(std::memory_order_acquire)) {
+        connFd = ::accept(listenFd, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+        if (connFd >= 0)
+            break;
+
+        const int err = errno;
+        if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+
+        if (err != EBADF && err != EINVAL)
+            spdlog::error("[P2P] accept() failed (errno={})", err);
+        break;
+    }
 
     if (connFd < 0 || !m_Running.load(std::memory_order_acquire)) {
         m_Running.store(false, std::memory_order_release);
         return;
     }
 
+    m_Socket.Reset();
     m_Socket = UniqueSocket(connFd);
 
     std::array<char, INET_ADDRSTRLEN> peerIp{};
@@ -403,7 +553,7 @@ void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
     spdlog::info("[P2P] TCP accepted from {}:{}", peerIp.data(), ntohs(peer.sin_port));
 
     try {
-        auto km          = GenerateP2PCredentials(keyType);
+        auto km          = GenerateOrLoadP2PCredentials(m_OwnUsername, keyType);
         auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
         auto callbacks   = std::make_shared<P2PCallbacks>(m_Socket.Get(), *this, m_PeerUsername);
         auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng);
@@ -490,6 +640,21 @@ void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel,
             AppendMessage("System",
                 std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
             break;
+        } else {
+            const int err = errno;
+            if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
+                // no data this tick
+            } else if (err == ECONNRESET || err == ENOTCONN || err == EPIPE) {
+                AppendMessage("System",
+                    std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
+                break;
+            } else if ((err == EBADF || err == ENOTSOCK) &&
+                       !m_Running.load(std::memory_order_acquire)) {
+                break;
+            } else {
+                spdlog::warn("[P2P] recv() failed (errno={})", err);
+                break;
+            }
         }
 
         if (!m_Connected.load(std::memory_order_acquire) && callbacks->IsActivated())

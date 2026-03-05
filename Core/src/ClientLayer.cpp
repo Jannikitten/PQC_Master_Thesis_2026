@@ -148,14 +148,24 @@ void ClientLayer::OnAttach() {
     m_ScratchBuffer.resize(1024);
 
     m_Client = std::make_unique<Safira::Client>();
+    auto& app = Safira::ApplicationGUI::Get();
 
-    m_Client->OnServerConnected   ([this]()                       { OnConnected();        });
-    m_Client->OnServerDisconnected([this]()                       { OnDisconnected();     });
-    m_Client->OnDataReceived      ([this](Safira::ByteSpan data)  { OnDataReceived(data); });
+    m_Client->OnServerConnected([this, &app]() {
+        app.QueueEvent([this] { OnConnected(); });
+    });
+
+    m_Client->OnServerDisconnected([this, &app]() {
+        app.QueueEvent([this] { OnDisconnected(); });
+    });
+
+    m_Client->OnDataReceived([this, &app](Safira::ByteSpan data) {
+        std::vector<uint8_t> copied(data.begin(), data.end());
+        app.QueueEvent([this, payload = std::move(copied)]() {
+            OnDataReceived(Safira::ByteSpan(payload.data(), payload.size()));
+        });
+    });
 
     m_Console.SetMessageSendCallback([this](std::string_view msg) { SendChatMessage(msg); });
-
-    auto& app = Safira::ApplicationGUI::Get();
     app.m_OnLogout = [this]() { Logout(); };
 
     LoadConnectionDetails(m_ConnectionDetailsFilePath);
@@ -320,6 +330,11 @@ void ClientLayer::UploadPeerAvatarTexture(const std::string& username,
                                           const std::vector<uint8_t>& avatarData) {
     if (avatarData.empty()) {
         m_PeerAvatars.erase(username);
+        std::lock_guard<std::mutex> lock(m_LobbyMutex);
+        for (auto& msg : m_LobbyMessages) {
+            if (msg.Who == username)
+                msg.AvatarTex = {};
+        }
         return;
     }
 
@@ -338,6 +353,11 @@ void ClientLayer::UploadPeerAvatarTexture(const std::string& username,
         spdlog::warn("Avatar for {} has unexpected size {} (expected {})",
                      username, avatarData.size(), expectedSize);
         m_PeerAvatars.erase(username);
+        std::lock_guard<std::mutex> lock(m_LobbyMutex);
+        for (auto& msg : m_LobbyMessages) {
+            if (msg.Who == username)
+                msg.AvatarTex = {};
+        }
         return;
     }
 
@@ -349,6 +369,13 @@ void ClientLayer::UploadPeerAvatarTexture(const std::string& username,
     cache.Tex      = (ImTextureID)cache.Image->GetDescriptorSet();
     cache.DataHash = hash;
     m_PeerAvatars[username] = std::move(cache);
+
+    // Rebind historical lobby messages to the latest descriptor handle.
+    std::lock_guard<std::mutex> lock(m_LobbyMutex);
+    for (auto& msg : m_LobbyMessages) {
+        if (msg.Who == username)
+            msg.AvatarTex = m_PeerAvatars[username].Tex;
+    }
 }
 
 // =========================================================================
@@ -409,8 +436,10 @@ void ClientLayer::LeavePrivateChat(const std::string& peerUsername) {
 
 void ClientLayer::UI_ConnectionModal() {
     if (!m_ConnectionModalOpen &&
-        m_Client->GetConnectionStatus() != Safira::ConnectionStatus::Connected)
-        ImGui::OpenPopup("Connect to Safira");
+        m_Client->GetConnectionStatus() != Safira::ConnectionStatus::Connected &&
+        !m_ShowCropModal &&
+        !ImGui::IsPopupOpen("Crop Avatar##CropModal"))
+        ImGui::OpenPopup("Connection");
 
     const auto& t = Theme::Get();
     ImGui::PushStyleColor(ImGuiCol_PopupBg,       t.BgPopup);
@@ -424,8 +453,12 @@ void ClientLayer::UI_ConnectionModal() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
 
+    const ImVec2 vpSize = ImGui::GetMainViewport()->WorkSize;
+    const float modalW = std::clamp(vpSize.x * 0.52f, 500.0f, 640.0f);
+    const float modalH = std::clamp(vpSize.y * 0.46f, 310.0f, 380.0f);
+    ImGui::SetNextWindowSize({ modalW, modalH }, ImGuiCond_Always);
     m_ConnectionModalOpen = ImGui::BeginPopupModal(
-        "Connect to Safira", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        "Connection", nullptr, ImGuiWindowFlags_NoResize);
 
     if (!m_ConnectionModalOpen) {
         ImGui::PopStyleVar(2);
@@ -433,121 +466,174 @@ void ClientLayer::UI_ConnectionModal() {
         return;
     }
 
-    // ── Title header ──────────────────────────────────────────────
-    ImFont* bold = SidebarBoldFont();
-    if (bold) ImGui::PushFont(bold);
-    ImGui::TextColored(U32ToVec4(Theme::Get().Accent), "Safira");
-    if (bold) ImGui::PopFont();
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Post-Quantum Secure Messaging");
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    const auto statusPreview = m_Client->GetConnectionStatus();
+    const std::string debugMessage = m_Client->GetConnectionDebugMessage();
+    float statusReserve = 0.0f;
+    if (statusPreview == Safira::ConnectionStatus::FailedToConnect) {
+        statusReserve = debugMessage.empty() ? 24.0f : 42.0f;
+    } else if (statusPreview == Safira::ConnectionStatus::Connecting) {
+        statusReserve = 24.0f;
+    }
+    float bodyH = ImGui::GetContentRegionAvail().y - statusReserve - 6.0f;
+    if (bodyH < 210.0f) bodyH = 210.0f;
 
-    // ── Username ──────────────────────────────────────────────────
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Username");
-    ImGui::SetNextItemWidth(280.0f);
-    ImGui::InputText("##username", &m_Username);
-    ImGui::Spacing();
-
-    // ── Avatar image (replaces colour / icon picker) ─────────────
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Profile Image");
-
-    // Avatar preview + browse button on the same line
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, t.BgPopupAlt);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+    ImGui::BeginChild("##ConnectBody", { 0.0f, bodyH }, true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     {
-        const float previewR = 24.0f;
-        const float previewSize = previewR * 2.0f;
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 center = { pos.x + previewR, pos.y + previewR };
+        const float bodyW = ImGui::GetContentRegionAvail().x;
+        const float leftW = std::clamp(bodyW * 0.34f, 160.0f, 220.0f);
+        const float panelGap = 12.0f;
+        const float panelH = ImGui::GetContentRegionAvail().y;
 
-        if (m_AvatarTexture) {
-            dl->AddImageRounded(m_AvatarTexture,
-                { center.x - previewR, center.y - previewR },
-                { center.x + previewR, center.y + previewR },
-                { 0, 0 }, { 1, 1 },
-                Theme::Get().AvatarImageTint, previewR);
-        } else {
-            // Placeholder circle
-            dl->AddCircleFilled(center, previewR,
-                                IM_COL32(80, 80, 90, 255), 24);
-            char letter = m_Username.empty()
-                ? '?'
-                : static_cast<char>(toupper(m_Username[0]));
-            char buf[2] = { letter, '\0' };
-            ImVec2 lsz = ImGui::CalcTextSize(buf);
-            dl->AddText({ center.x - lsz.x * 0.5f, center.y - lsz.y * 0.5f },
-                        IM_COL32(200, 200, 210, 255), buf);
-        }
-        ImGui::Dummy({ previewSize, previewSize });
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, t.BgFrame);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
 
-        ImGui::SameLine(0, 12.0f);
+        // Left panel: true circular avatar + actions (no rectangular image card)
+        ImGui::BeginChild("##ConnectAvatarPanel", { leftW, panelH }, true,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        {
+            ImDrawList* panelDl = ImGui::GetWindowDrawList();
+            const float avatarDiameter = 106.0f;
+            const float avatarRadius = avatarDiameter * 0.5f;
+            const float availW = ImGui::GetContentRegionAvail().x;
+            const float avatarIndent = std::max(0.0f, (availW - avatarDiameter) * 0.5f);
 
-        // Browse button — opens native file dialog
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-        if (ImGui::Button("Browse...", { 90, previewSize })) {
-            auto path = Safira::FileDialog::OpenImage();
-            if (path) {
-                LoadAvatarImage(*path);
+            ImGui::Dummy({ 0.0f, 6.0f });
+            ImGui::Indent(avatarIndent);
+            ImGui::InvisibleButton("##AvatarPreview", { avatarDiameter, avatarDiameter });
+            ImGui::Unindent(avatarIndent);
+
+            const ImVec2 avatarMin = ImGui::GetItemRectMin();
+            const ImVec2 avatarMax = ImGui::GetItemRectMax();
+            const ImVec2 center = {
+                (avatarMin.x + avatarMax.x) * 0.5f,
+                (avatarMin.y + avatarMax.y) * 0.5f
+            };
+
+            panelDl->AddCircleFilled(center, avatarRadius + 8.0f, IM_COL32(44, 46, 62, 255), 48);
+            panelDl->AddCircle(center, avatarRadius + 8.0f, t.InputBorder, 48, 1.2f);
+
+            if (m_AvatarTexture) {
+                panelDl->AddImageRounded(m_AvatarTexture,
+                    { center.x - avatarRadius, center.y - avatarRadius },
+                    { center.x + avatarRadius, center.y + avatarRadius },
+                    { 0, 0 }, { 1, 1 },
+                    t.AvatarImageTint, avatarRadius);
+            } else {
+                panelDl->AddCircleFilled(center, avatarRadius, IM_COL32(84, 84, 96, 255), 48);
+                char letter = m_Username.empty() ? '?' : static_cast<char>(toupper(m_Username[0]));
+                char buf[2] = { letter, '\0' };
+                ImVec2 lsz = ImGui::CalcTextSize(buf);
+                panelDl->AddText({ center.x - lsz.x * 0.5f, center.y - lsz.y * 0.5f },
+                                 IM_COL32(236, 236, 242, 255), buf);
+            }
+
+            const float actionH = 36.0f;
+            const float footerY = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - actionH;
+            if (ImGui::GetCursorPosY() < footerY)
+                ImGui::SetCursorPosY(footerY);
+
+            float browseW = ImGui::GetContentRegionAvail().x;
+            if (m_AvatarTexture)
+                browseW = std::max(96.0f, browseW - 66.0f);
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        t.SendBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.SendBtnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  t.SendBtnActive);
+            ImGui::PushStyleColor(ImGuiCol_Text,          t.SendBtnText);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 10.0f, 7.0f });
+            if (ImGui::Button("Browse Image", { browseW, actionH })) {
+                auto path = Safira::FileDialog::OpenImage();
+                if (path) {
+                    LoadAvatarImage(*path);
+                    if (m_ShowCropModal)
+                        ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+
+            if (m_AvatarTexture) {
+                ImGui::SameLine(0.0f, 6.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button,         IM_COL32(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  t.LogoutBtnHover);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,   t.LogoutBtnActive);
+                ImGui::PushStyleColor(ImGuiCol_Text,           t.LogoutIcon);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 8.0f, 7.0f });
+                if (ImGui::Button("Clear", { 60.0f, actionH })) {
+                    m_AvatarTexture   = {};
+                    m_AvatarImage     = nullptr;
+                    m_AvatarBytes.clear();
+                    m_AvatarImagePath.clear();
+                }
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(4);
             }
         }
-        ImGui::PopStyleVar();
+        ImGui::EndChild();
 
-        // Clear button if an avatar is set
-        if (m_AvatarTexture) {
-            ImGui::SameLine(0, 4.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 40, 40, 255));
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-            if (ImGui::Button("Clear", { 50, previewSize })) {
-                m_AvatarTexture   = {};
-                m_AvatarImage     = nullptr;
-                m_AvatarBytes.clear();
-                m_AvatarImagePath.clear();
+        ImGui::SameLine(0.0f, panelGap);
+
+        // Right panel: compact connection form + actions
+        ImGui::BeginChild("##ConnectFormPanel", { 0.0f, panelH }, true,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        {
+            ImGui::TextColored(U32ToVec4(t.TextSecondary), "Username");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputText("##username", &m_Username);
+
+            ImGui::Dummy({ 0.0f, 10.0f });
+            ImGui::TextColored(U32ToVec4(t.TextSecondary), "Server Address");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputText("##address", &m_ServerIP);
+
+            const float actionH = 36.0f;
+            const float footerY = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - actionH;
+            if (ImGui::GetCursorPosY() < footerY)
+                ImGui::SetCursorPosY(footerY);
+
+            const float actionW = (ImGui::GetContentRegionAvail().x - 12.0f) * 0.5f;
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        t.SendBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.SendBtnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  t.SendBtnActive);
+            ImGui::PushStyleColor(ImGuiCol_Text,          t.SendBtnText);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 12.0f, 8.0f });
+            if (ImGui::Button("Connect", { actionW, actionH })) {
+                std::string addr = m_ServerIP;
+                if (addr.rfind(':') == std::string::npos)
+                    addr += ":8192";
+                m_Client->ConnectToServer(addr);
             }
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+
+            ImGui::SameLine(0.0f, 12.0f);
+
+            ImGui::PushStyleColor(ImGuiCol_Button,         IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  t.LogoutBtnHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   t.LogoutBtnActive);
+            ImGui::PushStyleColor(ImGuiCol_Text,           t.LogoutIcon);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 12.0f, 8.0f });
+            if (ImGui::Button("Quit", { actionW, actionH }))
+                Safira::ApplicationGUI::Get().Close();
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
         }
+        ImGui::EndChild();
+
+        ImGui::PopStyleVar(1);
+        ImGui::PopStyleColor(1);
     }
-
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary * 0.7f),
-                       "Optional — a random colour is assigned if no image is chosen.");
-    ImGui::Spacing();
-
-    // ── Server address ───────────────────────────────────────────
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextSecondary), "Server Address");
-    ImGui::SetNextItemWidth(200.0f);
-    ImGui::InputText("##address", &m_ServerIP);
-    ImGui::SameLine();
-
-    // Connect button
-    ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().AccentActive);
-    ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-
-    if (ImGui::Button("Connect", { 80, 0 })) {
-        std::string addr = m_ServerIP;
-        if (addr.rfind(':') == std::string::npos)
-            addr += ":8192";
-        m_Client->ConnectToServer(addr);
-    }
-
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor(4);
-
-    ImGui::Spacing();
-
-    // Quit button
-    ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().DeclineBtn);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().DeclineBtnHover);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().DeclineBtnActive);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-
-    if (Safira::UI::ButtonCentered("Quit"))
-        Safira::ApplicationGUI::Get().Close();
-
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor(3);
+    ImGui::EndChild();
+    ImGui::PopStyleVar(1);
+    ImGui::PopStyleColor(1);
 
     // ── Connection status feedback / send packet on success ──────
     if (const auto status = m_Client->GetConnectionStatus();
@@ -572,7 +658,7 @@ void ClientLayer::UI_ConnectionModal() {
         ImGui::CloseCurrentPopup();
     } else if (status == Safira::ConnectionStatus::FailedToConnect) {
         ImGui::TextColored({ 0.9f, 0.2f, 0.1f, 1.0f }, "Connection failed.");
-        const auto& msg = m_Client->GetConnectionDebugMessage();
+        const auto msg = m_Client->GetConnectionDebugMessage();
         if (!msg.empty())
             ImGui::TextColored({ 0.9f, 0.2f, 0.1f, 1.0f }, "%s", msg.c_str());
     } else if (status == Safira::ConnectionStatus::Connecting) {
@@ -888,10 +974,11 @@ void ClientLayer::UI_IncomingInvites() {
         const float availW = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - totalW) * 0.5f);
 
-        ImGui::PushStyleColor(ImGuiCol_Button,       Theme::Get().Accent);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().AccentHover);
-        ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().AccentText);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button,        Theme::Get().SendBtn);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::Get().SendBtnHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::Get().SendBtnActive);
+    ImGui::PushStyleColor(ImGuiCol_Text,          Theme::Get().SendBtnText);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
 
         if (ImGui::Button("Accept", { btnW, 0 })) {
             StartPrivateChatAsResponder(invite.FromUsername);
@@ -900,7 +987,7 @@ void ClientLayer::UI_IncomingInvites() {
         }
 
         ImGui::PopStyleVar();
-        ImGui::PopStyleColor(3);
+        ImGui::PopStyleColor(4);
 
         ImGui::SameLine(0, btnGap);
 
@@ -1263,14 +1350,17 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
 
             if (pkt.From == m_Username) return;
 
-            Safira::MessageRole role = (pkt.From == "SERVER")
-                    ? Safira::MessageRole::System
-                    : Safira::MessageRole::Peer;
+            Safira::MessageRole role = Safira::MessageRole::Peer;
             AddLobbyMessage(pkt.From, pkt.Message, col, role);
         },
         [&](const Safira::ConnectionResponsePacket& pkt) {
             if (pkt.Accepted) {
                 m_ShowSuccessfulConnectionMessage = true;
+                m_Console.AddItalicMessageWithColor(
+                    0xFF8A8A8A, "Welcome {}!", m_Username);
+                AddLobbyMessage("System",
+                    std::format("Welcome {}!", m_Username),
+                    Theme::Get().TextSystem, Safira::MessageRole::System);
             } else {
                 m_Console.AddItalicMessageWithColor(
                     0xFFFA4A4A,
@@ -1295,24 +1385,46 @@ void ClientLayer::OnDataReceived(Safira::ByteSpan data) {
             }
 
             // Remove stale peer avatars for users no longer in the list
+            std::vector<std::string> removedUsers;
             std::erase_if(m_PeerAvatars, [&](const auto& pair) {
-                return !m_ConnectedClients.contains(pair.first);
+                const bool remove = !m_ConnectedClients.contains(pair.first);
+                if (remove) removedUsers.push_back(pair.first);
+                return remove;
             });
+            if (!removedUsers.empty()) {
+                std::lock_guard<std::mutex> lock(m_LobbyMutex);
+                for (auto& msg : m_LobbyMessages) {
+                    if (std::ranges::find(removedUsers, msg.Who) != removedUsers.end())
+                        msg.AvatarTex = {};
+                }
+            }
         },
         [&](const Safira::ClientConnectPacket& pkt) {
-            m_Console.AddItalicMessageWithColor(pkt.Client.Color,
-                                                "Welcome {}!", pkt.Client.Username);
+            if (pkt.Client.Username != m_Username) {
+                m_Console.AddItalicMessageWithColor(pkt.Client.Color,
+                                                    "Welcome {}!", pkt.Client.Username);
+            }
             m_ConnectedClients[pkt.Client.Username] = pkt.Client;
 
             // Cache their avatar
             if (pkt.Client.Username != m_Username)
                 UploadPeerAvatarTexture(pkt.Client.Username, pkt.Client.AvatarData);
-
-            AddLobbyMessage("System",
-                std::format("Welcome {}!", pkt.Client.Username),
-                Theme::Get().TextSystem, Safira::MessageRole::System);
+            if (pkt.Client.Username != m_Username) {
+                AddLobbyMessage("System",
+                    std::format("{} joined the lobby.", pkt.Client.Username),
+                    Theme::Get().TextSystem, Safira::MessageRole::System);
+            }
         },
         [&](const Safira::ClientDisconnectPacket& pkt) {
+            // Scrub stale descriptor handles from historical messages before
+            // removing avatar cache entries and freeing textures.
+            {
+                std::lock_guard<std::mutex> lock(m_LobbyMutex);
+                for (auto& msg : m_LobbyMessages) {
+                    if (msg.Who == pkt.Client.Username)
+                        msg.AvatarTex = {};
+                }
+            }
             m_ConnectedClients.erase(pkt.Client.Username);
             m_PeerAvatars.erase(pkt.Client.Username);
             m_PrivateChats.erase(pkt.Client.Username);
@@ -1406,7 +1518,7 @@ void ClientLayer::SendPrivateChatResponse(const std::string& toUsername, bool ac
 }
 
 void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
-    auto session = std::make_unique<Safira::PrivateChatSession>(peerUsername);
+    auto session = std::make_unique<Safira::PrivateChatSession>(m_Username, peerUsername);
     const uint16_t port = session->StartAsResponder(Safira::P2PKeyType::RSA_PSS);
     if (port == 0) {
         m_Console.AddItalicMessage("Failed to start P2P listener for {}", peerUsername);
@@ -1425,7 +1537,7 @@ void ClientLayer::StartPrivateChatAsResponder(const std::string& peerUsername) {
 
 void ClientLayer::StartPrivateChatAsInitiator(const std::string& peerUsername,
                                               const std::string& peerAddress) {
-    auto session = std::make_unique<Safira::PrivateChatSession>(peerUsername);
+    auto session = std::make_unique<Safira::PrivateChatSession>(m_Username, peerUsername);
     session->StartAsInitiator(peerAddress);
     m_PrivateChats[peerUsername] = std::move(session);
     m_Console.AddItalicMessage("Connecting to {} for private chat...", peerUsername);

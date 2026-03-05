@@ -14,7 +14,7 @@
 //
 // Wire format:
 //   Trivially-copyable types: raw memcpy of sizeof(T) bytes
-//   Strings:  size_t (8 bytes on 64-bit) + char data  (matches old StreamWriter)
+//   Strings:  uint32_t + char data
 //   Vectors:  uint32_t count + elements
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -29,6 +29,11 @@
 #include <vector>
 
 namespace Safira {
+
+// Hard caps for untrusted wire lengths (DoS protection).
+static constexpr size_t   kMaxSerializedStringBytes   = 8 * 1024;      // 8 KiB
+static constexpr uint32_t kMaxSerializedVectorElements = 64 * 1024;    // 65,536 elems
+static constexpr uint32_t kMaxSerializedBinaryBytes    = 1024 * 1024;  // 1 MiB
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BufferWriter — writes into a pre-allocated or growable byte buffer
@@ -136,21 +141,21 @@ template <typename T>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// String serialization (wire format: size_t + char data)
-//
-// Matches the old StreamWriter::WriteString exactly.
+// String serialization (wire format: uint32_t + char data)
 // ─────────────────────────────────────────────────────────────────────────────
 
 [[nodiscard]] inline bool Serialize(BufferWriter& w, const std::string& s) {
-    const size_t size = s.size();
-    if (!w.WriteBytes(&size, sizeof(size_t))) return false;
+    if (s.size() > kMaxSerializedStringBytes) return false;
+    const auto size = static_cast<uint32_t>(s.size());
+    if (!w.WriteBytes(&size, sizeof(uint32_t))) return false;
     if (size > 0 && !w.WriteBytes(s.data(), size)) return false;
     return true;
 }
 
 [[nodiscard]] inline bool Serialize(BufferWriter& w, std::string_view s) {
-    const size_t size = s.size();
-    if (!w.WriteBytes(&size, sizeof(size_t))) return false;
+    if (s.size() > kMaxSerializedStringBytes) return false;
+    const auto size = static_cast<uint32_t>(s.size());
+    if (!w.WriteBytes(&size, sizeof(uint32_t))) return false;
     if (size > 0 && !w.WriteBytes(s.data(), size)) return false;
     return true;
 }
@@ -161,10 +166,12 @@ std::expected<T, ParseError> Deserialize(BufferReader& r);
 template <>
 [[nodiscard]] inline std::expected<std::string, ParseError>
 Deserialize<std::string>(BufferReader& r) {
-    auto sizeResult = Deserialize<size_t>(r);
+    auto sizeResult = Deserialize<uint32_t>(r);
     if (!sizeResult) return std::unexpected(sizeResult.error());
 
-    const size_t size = *sizeResult;
+    const size_t size = static_cast<size_t>(*sizeResult);
+    if (size > kMaxSerializedStringBytes)
+        return std::unexpected(ParseError::StringTooLong);
     if (r.Remaining() < size)
         return std::unexpected(ParseError::UnexpectedEnd);
 
@@ -193,6 +200,13 @@ template <typename T>
 DeserializeVector(BufferReader& r) {
     auto count = Deserialize<uint32_t>(r);
     if (!count) return std::unexpected(count.error());
+    if (*count > kMaxSerializedVectorElements)
+        return std::unexpected(ParseError::InvalidData);
+
+    if constexpr (std::is_same_v<T, uint8_t>) {
+        if (*count > kMaxSerializedBinaryBytes)
+            return std::unexpected(ParseError::InvalidData);
+    }
 
     std::vector<T> vec;
     vec.reserve(*count);

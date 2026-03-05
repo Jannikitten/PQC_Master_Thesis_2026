@@ -7,6 +7,7 @@
 #include "MacOSWindow.h"
 #include "imgui_internal.h"
 #include "stb_image.h"
+#include <atomic>
 #include <stdio.h>          // printf, fprintf
 #include <stdlib.h>
 #include <chrono>
@@ -66,13 +67,20 @@ static uint32_t s_CurrentFrameIndex = 0;
 
 static Safira::ApplicationGUI* s_Instance = nullptr;
 static std::unordered_map<std::string, ImFont*> s_Fonts;
+static std::atomic<int> s_VulkanFatalError { VK_SUCCESS };
 
 void check_vk_result(VkResult err) {
     if (err == VK_SUCCESS)
         return;
     fprintf(stderr, "[vulkan] Error: VkResult = %d\n", err);
-    if (err < 0)
-        abort();
+    if (err < 0) {
+        if (s_VulkanFatalError.exchange(static_cast<int>(err), std::memory_order_acq_rel) == VK_SUCCESS) {
+            spdlog::critical("[vulkan] fatal device error: {}", static_cast<int>(err));
+            if (s_Instance)
+                s_Instance->Close();
+            g_ApplicationRunning = false;
+        }
+    }
 }
 
 #ifdef APP_USE_VULKAN_DEBUG_REPORT
@@ -195,9 +203,13 @@ static void SetupVulkan(ImVector<const char*> instance_extensions) {
 
     // Create Descriptor Pool
     {
+        // Chat UI uses many dynamic textures (avatars, crop previews, icons).
+        // Keep this comfortably above the backend minimum to avoid
+        // VK_ERROR_OUT_OF_POOL_MEMORY during normal usage.
+        constexpr uint32_t kDescriptorSamplerPoolSize = 512;
         VkDescriptorPoolSize pool_sizes[] =
         {
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kDescriptorSamplerPoolSize },
         };
         VkDescriptorPoolCreateInfo pool_info = {};
         pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -276,6 +288,12 @@ static void FrameRender(ImGui_ImplVulkanH_Window* wd, ImDrawData* draw_data)
 
         err = vkResetFences(g_Device, 1, &fd->Fence);
         check_vk_result(err);
+
+        // This frame slot has completed on GPU; release deferred resources.
+        s_CurrentFrameIndex = wd->FrameIndex;
+        for (auto& func : s_ResourceFreeQueue[s_CurrentFrameIndex])
+            func();
+        s_ResourceFreeQueue[s_CurrentFrameIndex].clear();
     }
     {
         err = vkResetCommandPool(g_Device, fd->CommandPool, 0);

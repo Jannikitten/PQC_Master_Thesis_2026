@@ -22,12 +22,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <print>
 #include <ranges>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -38,6 +42,51 @@
 #include <spdlog/spdlog.h>
 
 namespace Safira {
+
+namespace {
+constexpr const char* kServerCertPath = "server-cert.der";
+constexpr const char* kServerKeyPath  = "server-key.der";
+
+[[nodiscard]] std::filesystem::path GetSafiraDataDir() {
+    const char* home = std::getenv("HOME");
+    const std::filesystem::path base = (home && *home)
+        ? std::filesystem::path(home) / ".safira"
+        : std::filesystem::path(".safira");
+
+    std::error_code ec;
+    std::filesystem::create_directories(base, ec);
+    ::chmod(base.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+    return base;
+}
+
+[[nodiscard]] bool ReadFileBytes(const std::filesystem::path& path, std::vector<uint8_t>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return false;
+
+    in.seekg(0, std::ios::end);
+    const std::streamsize sz = in.tellg();
+    if (sz <= 0)
+        return false;
+    in.seekg(0, std::ios::beg);
+
+    out.resize(static_cast<size_t>(sz));
+    return static_cast<bool>(in.read(reinterpret_cast<char*>(out.data()), sz));
+}
+
+[[nodiscard]] bool WriteFileBytes(const std::filesystem::path& path, std::span<const uint8_t> data) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+        return false;
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    out.flush();
+    if (!out.good()) return false;
+
+    // Default to owner-read/write only for key and cert material.
+    ::chmod(path.string().c_str(), S_IRUSR | S_IWUSR);
+    return static_cast<bool>(out);
+}
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -63,8 +112,6 @@ Server::Server(const ServerConfig& config) : m_Config(config) {}
 
 Server::~Server() {
     Stop();
-    if (m_NetworkThread.joinable())
-        m_NetworkThread.join();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -72,12 +119,24 @@ Server::~Server() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Server::Start() {
-    if (m_Running.load(std::memory_order_acquire)) return;
-    m_NetworkThread = std::thread(&Server::NetworkThreadFunc, this);
+    if (m_Running.load(std::memory_order_acquire))
+        return;
+
+    m_NetworkExecutor.Stop();
+    if (!m_NetworkExecutor.Start("server-dtls")) {
+        OnFatalError("failed to start server network executor");
+        return;
+    }
+
+    if (!m_NetworkExecutor.Post([this] { NetworkThreadFunc(); })) {
+        OnFatalError("failed to schedule server network loop");
+        m_NetworkExecutor.Stop();
+    }
 }
 
 void Server::Stop() {
     m_Running.store(false, std::memory_order_release);
+    m_NetworkExecutor.Stop();
 }
 
 void Server::OnDataReceived(DataReceivedCallback fn)             { m_OnDataReceived       = std::move(fn); }
@@ -206,20 +265,35 @@ std::expected<WolfContext, ServerError> Server::CreateTLSContext() const {
     wolfSSL_CTX_SetIORecv(ctx.get(), IORecv);
     wolfSSL_CTX_SetIOSend(ctx.get(), IOSend);
 
-    // ── Generate cert + key in memory ───────────────────────────────────
-    auto creds = GenerateSelfSignedCert();
-    if (!creds)
-        return std::unexpected(creds.error());
+    const auto certPath = GetSafiraDataDir() / kServerCertPath;
+    const auto keyPath  = GetSafiraDataDir() / kServerKeyPath;
+
+    GeneratedCredentials creds;
+    if (!ReadFileBytes(certPath, creds.CertDer)
+        || !ReadFileBytes(keyPath, creds.KeyDer)) {
+        // Legacy migration path: import existing cert/key from cwd.
+        if (!(ReadFileBytes(kServerCertPath, creds.CertDer)
+              && ReadFileBytes(kServerKeyPath, creds.KeyDer))) {
+            auto generated = GenerateSelfSignedCert();
+            if (!generated)
+                return std::unexpected(generated.error());
+            creds = std::move(*generated);
+        }
+
+        if (!WriteFileBytes(certPath, creds.CertDer)
+            || !WriteFileBytes(keyPath, creds.KeyDer))
+            return std::unexpected(ServerError::CertificateGeneration);
+    }
 
     if (wolfSSL_CTX_use_certificate_buffer(
-            ctx.get(), creds->CertDer.data(),
-            static_cast<long>(creds->CertDer.size()),
+            ctx.get(), creds.CertDer.data(),
+            static_cast<long>(creds.CertDer.size()),
             WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS)
         return std::unexpected(ServerError::CertificateLoad);
 
     if (wolfSSL_CTX_use_PrivateKey_buffer(
-            ctx.get(), creds->KeyDer.data(),
-            static_cast<long>(creds->KeyDer.size()),
+            ctx.get(), creds.KeyDer.data(),
+            static_cast<long>(creds.KeyDer.size()),
             WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS)
         return std::unexpected(ServerError::PrivateKeyLoad);
 

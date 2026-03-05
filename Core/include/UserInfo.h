@@ -24,8 +24,8 @@ namespace Safira {
 // ─────────────────────────────────────────────────────────────────────────────
 // Avatar constants
 // ─────────────────────────────────────────────────────────────────────────────
-static constexpr int    kAvatarPixelSize = 64;           // target square size
-static constexpr size_t kMaxAvatarBytes  = kAvatarPixelSize * kAvatarPixelSize * 4;  // 16 KB raw RGBA
+static constexpr int    kAvatarPixelSize = 16;           // target square size (DTLS-safe payload)
+static constexpr size_t kMaxAvatarBytes  = kAvatarPixelSize * kAvatarPixelSize * 4;  // 1 KB raw RGBA
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Random avatar colours — used when no image is set.

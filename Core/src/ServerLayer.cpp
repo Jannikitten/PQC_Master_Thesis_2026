@@ -31,6 +31,7 @@
 #include <print>
 #include <random>
 #include <ranges>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -46,6 +47,8 @@ static constexpr size_t kMaxUsernameLength   = 24;
 static constexpr int    kRateLimitMessages   = 10;     // messages per window
 static constexpr float  kRateLimitWindowSec  = 5.0f;   // sliding window
 static constexpr int    kFloodKickThreshold  = 3;      // violations before auto-kick
+static constexpr size_t kMaxHistoryMessages  = 5000;   // persistent server cap
+static constexpr size_t kHistorySyncLimit    = 500;    // messages sent on join
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Lifecycle
@@ -61,12 +64,39 @@ void ServerLayer::OnAttach() {
 
     m_Server = std::make_unique<Safira::Server>(config);
 
-    m_Server->OnClientConnected(
-        [this](Safira::ClientInfo& c) { OnClientConnected(c); });
-    m_Server->OnClientDisconnected(
-        [this](Safira::ClientInfo& c) { OnClientDisconnected(c); });
-    m_Server->OnDataReceived(
-        [this](Safira::ClientInfo& c, Safira::ByteSpan d) { OnDataReceived(c, d); });
+    m_Server->OnClientConnected([this](Safira::ClientInfo& c) {
+        const Safira::ClientID id = c.ID;
+        const std::string addr = c.AddressStr;
+        EnqueueEvent([this, id, addr]() {
+            Safira::ClientInfo stub;
+            stub.ID = id;
+            stub.AddressStr = addr;
+            OnClientConnected(stub);
+        });
+    });
+
+    m_Server->OnClientDisconnected([this](Safira::ClientInfo& c) {
+        const Safira::ClientID id = c.ID;
+        const std::string addr = c.AddressStr;
+        EnqueueEvent([this, id, addr]() {
+            Safira::ClientInfo stub;
+            stub.ID = id;
+            stub.AddressStr = addr;
+            OnClientDisconnected(stub);
+        });
+    });
+
+    m_Server->OnDataReceived([this](Safira::ClientInfo& c, Safira::ByteSpan d) {
+        const Safira::ClientID id = c.ID;
+        const std::string addr = c.AddressStr;
+        std::vector<uint8_t> payload(d.begin(), d.end());
+        EnqueueEvent([this, id, addr, payload = std::move(payload)]() {
+            Safira::ClientInfo stub;
+            stub.ID = id;
+            stub.AddressStr = addr;
+            OnDataReceived(stub, payload);
+        });
+    });
     m_Server->Start();
 
     m_MessageHistoryFilePath = "MessageHistory.yaml";
@@ -85,7 +115,7 @@ void ServerLayer::OnAttach() {
     m_Console.AddItalicMessage("  /kick <user> [reason]  — disconnect a user");
     m_Console.AddItalicMessage("  /mute <user>           — silence a user (broadcast to all)");
     m_Console.AddItalicMessage("  /unmute <user>         — restore a user's voice");
-    m_Console.AddItalicMessage("  /list                  — show connected clients with uptime");
+    m_Console.AddItalicMessage("  /list                  — show connected clients");
     m_Console.AddItalicMessage("  /stats                 — server-wide statistics");
     m_Console.AddItalicMessage("  /broadcast <msg>       — send server announcement");
     m_Console.AddItalicMessage("  /motd [msg]            — set/clear message of the day");
@@ -100,6 +130,8 @@ void ServerLayer::OnDetach() {
 }
 
 void ServerLayer::OnUpdate(float ts) {
+    DrainQueuedEvents();
+
     m_ClientListTimer -= ts;
     if (m_ClientListTimer < 0) {
         m_ClientListTimer = kClientListInterval;
@@ -140,7 +172,7 @@ void ServerLayer::OnClientDisconnected(Safira::ClientInfo& clientInfo) {
 
 void ServerLayer::CleanupPendingInvites(Safira::ClientID disconnectedID,
                                         const std::string& disconnectedUsername) {
-    if (auto it = m_PendingPrivateChatInvites.find(disconnectedUsername);
+    if (auto it = m_PendingPrivateChatInvites.find(disconnectedID);
         it != m_PendingPrivateChatInvites.end()) {
         ForwardPrivateChatDeclined(it->second, disconnectedUsername);
         m_PendingPrivateChatInvites.erase(it);
@@ -231,6 +263,9 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
                 return;
 
             m_MessageHistory.emplace_back(client.Username, message);
+            if (m_MessageHistory.size() > kMaxHistoryMessages)
+                m_MessageHistory.erase(m_MessageHistory.begin(),
+                                       m_MessageHistory.begin() + static_cast<std::ptrdiff_t>(m_MessageHistory.size() - kMaxHistoryMessages));
             m_Console.AddTaggedMessageWithColor(
                 client.Color | 0xFF000000, client.Username, message);
             SendMessageToAllClients(clientInfo, message);
@@ -285,7 +320,7 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
                 return;
             }
 
-            m_PendingPrivateChatInvites[pkt.Username] = clientInfo.ID;
+            m_PendingPrivateChatInvites[*targetID] = clientInfo.ID;
             ForwardPrivateChatInvite(*targetID, fromUsername);
             m_Console.AddMessage("{} invited {} to a private chat",
                                 fromUsername, pkt.Username);
@@ -295,14 +330,40 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
             if (!m_ConnectedClients.contains(clientInfo.ID)) return;
             const auto& responderUsername = m_ConnectedClients.at(clientInfo.ID).Username;
 
-            auto initiatorID = FindClientID(pkt.Username);
-            m_PendingPrivateChatInvites.erase(responderUsername);
+            const auto pendingIt = m_PendingPrivateChatInvites.find(clientInfo.ID);
+            if (pendingIt == m_PendingPrivateChatInvites.end()) {
+                m_Console.AddMessage("Ignoring unsolicited private-chat response from {}",
+                                     responderUsername);
+                return;
+            }
 
-            if (!pkt.Accepted || !initiatorID) {
-                if (initiatorID)
-                    ForwardPrivateChatDeclined(*initiatorID, responderUsername);
+            const auto initiatorID = pendingIt->second;
+            if (!m_ConnectedClients.contains(initiatorID)) {
+                m_PendingPrivateChatInvites.erase(pendingIt);
+                return;
+            }
+
+            const auto& expectedInitiator = m_ConnectedClients.at(initiatorID).Username;
+            if (pkt.Username != expectedInitiator) {
+                m_Console.AddMessage(
+                    "Ignoring mismatched private-chat response from {} (expected {}, got {})",
+                    responderUsername, expectedInitiator, pkt.Username);
+                return;
+            }
+
+            m_PendingPrivateChatInvites.erase(pendingIt);
+
+            if (!pkt.Accepted) {
+                ForwardPrivateChatDeclined(initiatorID, responderUsername);
                 m_Console.AddMessage("{} declined private chat with {}",
                                     responderUsername, pkt.Username);
+                return;
+            }
+
+            if (pkt.ListenPort == 0) {
+                ForwardPrivateChatDeclined(initiatorID, responderUsername);
+                m_Console.AddMessage("{} sent invalid private-chat listen port",
+                                     responderUsername);
                 return;
             }
 
@@ -311,7 +372,7 @@ void ServerLayer::OnDataReceived(Safira::ClientInfo& clientInfo,
             std::string p2pAddress = std::string(addrStr.substr(0, colonPos))
                                    + ":" + std::to_string(pkt.ListenPort);
 
-            ForwardPrivateChatConnectTo(*initiatorID, responderUsername, p2pAddress);
+            ForwardPrivateChatConnectTo(initiatorID, responderUsername, p2pAddress);
             m_Console.AddMessage("{} accepted private chat with {} on {}",
                                 responderUsername, pkt.Username, p2pAddress);
         },
@@ -373,7 +434,7 @@ void ServerLayer::SendClientConnect(const Safira::ClientInfo& newClient) {
     Safira::BufferWriter writer(m_ScratchBuffer);
     Safira::SerializePacket(writer, Safira::ClientConnectPacket{
         m_ConnectedClients.at(newClient.ID) });
-    m_Server->SendToAllClients(writer.Written(), newClient.ID);
+    m_Server->SendToAllClients(writer.Written());
 }
 
 void ServerLayer::SendClientDisconnect(const Safira::ClientInfo& clientInfo) {
@@ -399,8 +460,15 @@ void ServerLayer::SendMessageToAllClients(const Safira::ClientInfo& from,
 }
 
 void ServerLayer::SendMessageHistory(const Safira::ClientInfo& clientInfo) {
+    const size_t start = (m_MessageHistory.size() > kHistorySyncLimit)
+        ? (m_MessageHistory.size() - kHistorySyncLimit)
+        : 0;
+    std::vector<Safira::ChatMessage> recent(
+        m_MessageHistory.begin() + static_cast<std::ptrdiff_t>(start),
+        m_MessageHistory.end());
+
     Safira::BufferWriter writer(m_ScratchBuffer);
-    Safira::SerializePacket(writer, Safira::MessageHistoryPacket{ m_MessageHistory });
+    Safira::SerializePacket(writer, Safira::MessageHistoryPacket{ std::move(recent) });
     m_Server->SendToClient(clientInfo.ID, writer.Written());
 }
 
@@ -450,6 +518,9 @@ void ServerLayer::SendChatMessage(std::string_view message) {
 
     m_Console.AddTaggedMessage("SERVER", message);
     m_MessageHistory.emplace_back("SERVER", std::string(message));
+    if (m_MessageHistory.size() > kMaxHistoryMessages)
+        m_MessageHistory.erase(m_MessageHistory.begin(),
+                               m_MessageHistory.begin() + static_cast<std::ptrdiff_t>(m_MessageHistory.size() - kMaxHistoryMessages));
 }
 
 void ServerLayer::OnCommand(std::string_view command) {
@@ -486,39 +557,18 @@ void ServerLayer::OnCommand(std::string_view command) {
                                    m_ConnectedClients.size(),
                                    m_Server->GetConfig().MaxClients);
         for (const auto& [id, info] : m_ConnectedClients) {
-            auto metrics = m_Server->GetClientMetrics(id);
-            if (metrics) {
-                m_Console.AddItalicMessage("  {} — uptime {:.0f}s, {} msgs",
-                                           info.Username,
-                                           metrics->UptimeSeconds(),
-                                           metrics->MessagesRecv);
-            } else {
-                m_Console.AddItalicMessage("  {}", info.Username);
-            }
+            (void)id;
+            m_Console.AddItalicMessage("  {}", info.Username);
         }
     }
     // ── /stats — server-wide statistics ─────────────────────────────────
     else if (cmd == "stats") {
-        uint64_t totalMsgs = 0;
-        uint64_t totalBytesIn = 0;
-        uint64_t totalBytesOut = 0;
-
-        for (const auto& [id, _] : m_ConnectedClients) {
-            if (auto m = m_Server->GetClientMetrics(id)) {
-                totalMsgs     += m->MessagesRecv;
-                totalBytesIn  += m->BytesRecv;
-                totalBytesOut += m->BytesSent;
-            }
-        }
-
         m_Console.AddItalicMessage("Server stats:");
         m_Console.AddItalicMessage("  Clients:  {}/{}",
                                    m_ConnectedClients.size(),
                                    m_Server->GetConfig().MaxClients);
-        m_Console.AddItalicMessage("  Messages: {} total ({} in history)",
-                                   totalMsgs, m_MessageHistory.size());
-        m_Console.AddItalicMessage("  Traffic:  {} KB in, {} KB out",
-                                   totalBytesIn / 1024, totalBytesOut / 1024);
+        m_Console.AddItalicMessage("  Messages: {} in history",
+                                   m_MessageHistory.size());
         m_Console.AddItalicMessage("  Muted:    {}", m_MutedUsers.size());
     }
     // ── /broadcast <message> — server announcement ──────────────────────
@@ -717,5 +767,26 @@ bool ServerLayer::LoadMessageHistoryFromFile(const std::filesystem::path& filepa
             node["User"].as<std::string>(),
             node["Message"].as<std::string>());
     }
+    if (m_MessageHistory.size() > kMaxHistoryMessages)
+        m_MessageHistory.erase(m_MessageHistory.begin(),
+                               m_MessageHistory.begin() + static_cast<std::ptrdiff_t>(m_MessageHistory.size() - kMaxHistoryMessages));
     return true;
+}
+
+void ServerLayer::EnqueueEvent(std::function<void()>&& fn) {
+    std::lock_guard lock(m_EventMutex);
+    m_PendingEvents.push(std::move(fn));
+}
+
+void ServerLayer::DrainQueuedEvents() {
+    std::queue<std::function<void()>> pending;
+    {
+        std::lock_guard lock(m_EventMutex);
+        pending.swap(m_PendingEvents);
+    }
+
+    while (!pending.empty()) {
+        pending.front()();
+        pending.pop();
+    }
 }

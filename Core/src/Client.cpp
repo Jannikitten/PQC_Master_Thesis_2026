@@ -14,12 +14,16 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <format>
 #include <print>
 #include <ranges>
 #include <thread>
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <fcntl.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -28,6 +32,40 @@
 #include <spdlog/spdlog.h>
 
 namespace Safira {
+
+namespace {
+constexpr const char* kTrustedServerCertPath = "server-cert.der";
+constexpr size_t kMaxPendingSendQueue = 512;
+
+[[nodiscard]] std::filesystem::path GetSafiraDataDir() {
+    const char* home = std::getenv("HOME");
+    const std::filesystem::path base = (home && *home)
+        ? std::filesystem::path(home) / ".safira"
+        : std::filesystem::path(".safira");
+    std::error_code ec;
+    std::filesystem::create_directories(base, ec);
+    return base;
+}
+
+[[nodiscard]] std::expected<std::vector<uint8_t>, ClientError>
+ReadFileBytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return std::unexpected(ClientError::TrustStoreLoad);
+
+    in.seekg(0, std::ios::end);
+    const std::streamsize sz = in.tellg();
+    if (sz <= 0)
+        return std::unexpected(ClientError::TrustStoreLoad);
+    in.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> out(static_cast<size_t>(sz));
+    if (!in.read(reinterpret_cast<char*>(out.data()), sz))
+        return std::unexpected(ClientError::TrustStoreLoad);
+
+    return out;
+}
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -49,16 +87,25 @@ Client::~Client() { Disconnect(); }
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Client::ConnectToServer(std::string_view address) {
-    if (m_Running.load(std::memory_order_acquire)) return;
-    if (m_NetworkThread.joinable()) m_NetworkThread.join();
+    if (m_Running.load(std::memory_order_acquire))
+        return;
 
+    m_NetworkExecutor.Stop();
     m_ServerAddress = std::string(address);
-    m_NetworkThread = std::thread(&Client::NetworkThreadFunc, this);
+    if (!m_NetworkExecutor.Start("client-dtls")) {
+        OnFatalError("failed to start client network executor");
+        return;
+    }
+
+    if (!m_NetworkExecutor.Post([this] { NetworkThreadFunc(); })) {
+        OnFatalError("failed to schedule client network loop");
+        m_NetworkExecutor.Stop();
+    }
 }
 
 void Client::Disconnect() {
     m_Running.store(false, std::memory_order_release);
-    if (m_NetworkThread.joinable()) m_NetworkThread.join();
+    m_NetworkExecutor.Stop();
 }
 
 void Client::OnDataReceived(DataReceivedCallback fn)        { m_OnDataReceived       = std::move(fn); }
@@ -195,9 +242,21 @@ Client::CreateTLSContext() const {
     wolfSSL_CTX_SetIOSend(ctx.get(), IOSend);
     wolfSSL_CTX_SetIORecv(ctx.get(), IORecv);
 
-    // Phase 1: skip cert verification.
-    // TODO Phase 2: wolfSSL_CTX_load_verify_locations(ctx.get(), "ca-cert.pem", nullptr);
-    wolfSSL_CTX_set_verify(ctx.get(), WOLFSSL_VERIFY_NONE, nullptr);
+    // Require server-authenticated DTLS using a pinned trust anchor.
+    auto cert = ReadFileBytes(GetSafiraDataDir() / kTrustedServerCertPath);
+    if (!cert)
+        cert = ReadFileBytes(kTrustedServerCertPath); // legacy fallback
+    if (!cert)
+        return std::unexpected(cert.error());
+
+    if (wolfSSL_CTX_load_verify_buffer(
+            ctx.get(),
+            cert->data(),
+            static_cast<long>(cert->size()),
+            WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS)
+        return std::unexpected(ClientError::TrustStoreLoad);
+
+    wolfSSL_CTX_set_verify(ctx.get(), WOLFSSL_VERIFY_PEER, nullptr);
 
     return ctx;
 }
@@ -246,15 +305,20 @@ Client::InitNetwork(std::string_view address) const {
     if (!socketResult) return std::unexpected(socketResult.error());
     const int sock = *socketResult;
 
-    // Phase 2: TLS context + session (depends on socket for I/O callbacks).
-    return CreateTLSContext()
-        .and_then([this, sock](WolfContext ctx) -> std::expected<ClientResources, ClientError> {
-            auto* rawCtx = ctx.get();
-            return CreateSession(rawCtx, sock)
-                .transform([sock, ctx = std::move(ctx)](WolfSession ssl) mutable -> ClientResources {
-                    return { sock, std::move(ctx), std::move(ssl) };
-                });
-        });
+    auto ctxResult = CreateTLSContext();
+    if (!ctxResult) {
+        ::close(sock);
+        return std::unexpected(ctxResult.error());
+    }
+    WolfContext ctx = std::move(*ctxResult);
+
+    auto sslResult = CreateSession(ctx.get(), sock);
+    if (!sslResult) {
+        ::close(sock);
+        return std::unexpected(sslResult.error());
+    }
+
+    return ClientResources{ sock, std::move(ctx), std::move(*sslResult) };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -264,9 +328,12 @@ Client::InitNetwork(std::string_view address) const {
 void Client::NetworkThreadFunc() {
     m_Running.store(true, std::memory_order_release);
     m_Phase              = Handshaking{};
-    m_SuppressShutdown   = false;
+    m_SuppressShutdown.store(false, std::memory_order_release);
     m_ConnectionStatus.store(ConnectionStatus::Connecting, std::memory_order_release);
-    m_ConnectionDebugMessage.clear();
+    {
+        std::lock_guard lock(m_StateMutex);
+        m_ConnectionDebugMessage.clear();
+    }
 
     wolfSSL_Init();
 
@@ -295,7 +362,7 @@ void Client::NetworkThreadFunc() {
             const int err = wolfSSL_get_error(m_SSL.get(), ret);
             if (!IsWantIO(err)) {
                 OnFatalError(std::format("handshake init failed: err={}", err));
-                return;
+                m_Running.store(false, std::memory_order_release);
             }
         }
     }
@@ -311,6 +378,20 @@ void Client::NetworkThreadFunc() {
             m_IncomingEncryptedBuffer.insert(
                 m_IncomingEncryptedBuffer.end(),
                 rawBuf.begin(), rawBuf.begin() + len);
+        } else if (len < 0) {
+            const int err = errno;
+            if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
+                // Non-fatal, no data available right now.
+            } else if (err == ECONNREFUSED || err == ECONNRESET
+                       || err == ENETUNREACH || err == EHOSTUNREACH || err == ENOTCONN) {
+                spdlog::warn("[client] server became unreachable (errno={})", err);
+                m_Running.store(false, std::memory_order_release);
+                continue;
+            } else {
+                spdlog::error("[client] recv failed (errno={})", err);
+                m_Running.store(false, std::memory_order_release);
+                continue;
+            }
         }
 
         // 2. §3.4 Typestate dispatch — compile-time exhaustive.
@@ -318,12 +399,13 @@ void Client::NetworkThreadFunc() {
             [this](Handshaking) { DriveHandshake(); },
             [this](Connected)   { DriveConnected(); },
         }, m_Phase);
+        DrainSendQueue();
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     // ── Cleanup — RAII does the heavy lifting ───────────────────────────────
-    if (m_SSL && !m_SuppressShutdown)
+    if (m_SSL && !m_SuppressShutdown.load(std::memory_order_acquire))
         wolfSSL_shutdown(m_SSL.get());
 
     m_SSL.reset();
@@ -335,6 +417,10 @@ void Client::NetworkThreadFunc() {
 
     m_Phase = Handshaking{};
     m_ConnectionStatus.store(ConnectionStatus::Disconnected, std::memory_order_release);
+    {
+        std::lock_guard lock(m_SendMutex);
+        m_SendQueue.clear();
+    }
 
     if (m_OnServerDisconnected)
         m_OnServerDisconnected();
@@ -365,8 +451,11 @@ void Client::DriveHandshake() {
     if (IsWantIO(err)) return;
 
     // Real failure.
-    m_ConnectionDebugMessage = std::format("handshake failed: err={}", err);
-    spdlog::error("[client] {}", m_ConnectionDebugMessage);
+    {
+        std::lock_guard lock(m_StateMutex);
+        m_ConnectionDebugMessage = std::format("handshake failed: err={}", err);
+        spdlog::error("[client] {}", m_ConnectionDebugMessage);
+    }
     m_ConnectionStatus.store(ConnectionStatus::FailedToConnect, std::memory_order_release);
     m_Running.store(false, std::memory_order_release);
 }
@@ -400,14 +489,40 @@ void Client::DriveConnected() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Client::Send(ByteSpan buf) {
-    if (!m_SSL || !std::holds_alternative<Connected>(m_Phase)) {
+    if (buf.empty()) return;
+    if (m_ConnectionStatus.load(std::memory_order_acquire) != ConnectionStatus::Connected) {
         spdlog::warn("[client] send before handshake complete");
         return;
     }
 
-    if (const int ret = wolfSSL_write(m_SSL.get(), buf.data(), static_cast<int>(buf.size())); ret <= 0)
-        spdlog::error("[client] wolfSSL_write failed: {}",
-                      wolfSSL_get_error(m_SSL.get(), ret));
+    std::lock_guard lock(m_SendMutex);
+    if (m_SendQueue.size() >= kMaxPendingSendQueue) {
+        m_SendQueue.erase(m_SendQueue.begin());
+        spdlog::warn("[client] send queue full, dropping oldest pending payload");
+    }
+    m_SendQueue.push_back(PendingClientSend{ .Data = { buf.begin(), buf.end() } });
+}
+
+void Client::DrainSendQueue() {
+    std::vector<PendingClientSend> batch;
+    {
+        std::lock_guard lock(m_SendMutex);
+        batch.swap(m_SendQueue);
+    }
+
+    for (const auto& send : batch) {
+        DoSend(ByteSpan(send.Data.data(), send.Data.size()));
+    }
+}
+
+void Client::DoSend(ByteSpan buf) {
+    if (!m_SSL || !std::holds_alternative<Connected>(m_Phase))
+        return;
+
+    if (const int ret = wolfSSL_write(m_SSL.get(), buf.data(), static_cast<int>(buf.size())); ret <= 0) {
+        const int err = wolfSSL_get_error(m_SSL.get(), ret);
+        spdlog::error("[client] wolfSSL_write failed: {}", err);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -418,7 +533,10 @@ void Client::Send(ByteSpan buf) {
 // ─────────────────────────────────────────────────────────────────────────────
 void Client::OnFatalError(std::string_view msg) {
     spdlog::critical("[client] fatal: {}", msg);
-    m_ConnectionDebugMessage = std::string(msg);
+    {
+        std::lock_guard lock(m_StateMutex);
+        m_ConnectionDebugMessage = std::string(msg);
+    }
     m_ConnectionStatus.store(ConnectionStatus::FailedToConnect, std::memory_order_release);
     m_Running.store(false, std::memory_order_release);
 }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include "P2PCredentialGenerator.h"
 #include "ChatPanel.h"
+#include "NetworkExecutor.h"
 
 #include <array>
 #include <atomic>
@@ -15,7 +16,6 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include <netinet/in.h>
@@ -74,7 +74,7 @@ class P2PCallbacks;
 
 class PrivateChatSession {
 public:
-    explicit PrivateChatSession(std::string peerUsername);
+    PrivateChatSession(std::string ownUsername, std::string peerUsername);
     ~PrivateChatSession();
 
     PrivateChatSession(const PrivateChatSession&)            = delete;
@@ -113,11 +113,12 @@ private:
     void RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks);
 
     std::string   m_PeerUsername;
+    std::string   m_OwnUsername;
     UniqueSocket  m_Socket;
 
     std::atomic<bool> m_Running   { false };
     std::atomic<bool> m_Connected { false };
-    std::thread       m_Thread;
+    NetworkExecutor   m_NetworkExecutor;
 
     std::vector<std::string> m_PendingOutbound;   // guarded by m_LogMutex
 
