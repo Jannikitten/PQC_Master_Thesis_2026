@@ -1,26 +1,18 @@
 #ifndef PQC_MASTER_THESIS_2026_PRIVATECHATSESSION_H
 #define PQC_MASTER_THESIS_2026_PRIVATECHATSESSION_H
 
-// PrivateChatSession.h -- peer-to-peer TLS 1.3 chat via Botan
-//                         (X25519/ML-KEM-768 key exchange)
-
-#include <algorithm>
-#include "P2PCredentialGenerator.h"
-#include "ChatPanel.h"
+#include "BotanCryptography.h"
+#include "PrivateChatCore.h"
 #include "NetworkExecutor.h"
+#include "ChatPanel.h"
 
-#include <array>
-#include <atomic>
-#include <cstdint>
 #include <expected>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
-
 #include <netinet/in.h>
-
-namespace Botan::TLS { class Channel; }
+#include <unistd.h>
 
 namespace Safira {
 
@@ -45,7 +37,9 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept { return m_Fd >= 0; }
 
     int Release() noexcept { int fd = m_Fd; m_Fd = -1; return fd; }
-    void Reset() noexcept;
+    void Reset() noexcept {
+        if (m_Fd >= 0) { ::close(m_Fd); m_Fd = -1; }
+    }
 
 private:
     int m_Fd = -1;
@@ -57,6 +51,7 @@ enum class P2PError : uint8_t {
     Listen,
     AddressParse,
     TcpConnect,
+    TlsInit
 };
 
 [[nodiscard]] constexpr std::string_view Describe(P2PError e) noexcept {
@@ -66,11 +61,10 @@ enum class P2PError : uint8_t {
         case P2PError::Listen:         return "listen() failed";
         case P2PError::AddressParse:   return "could not parse peer address";
         case P2PError::TcpConnect:     return "TCP connect() failed";
+        case P2PError::TlsInit:        return "TLS initialization failed";
     }
     return "unknown error";
 }
-
-class P2PCallbacks;
 
 class PrivateChatSession {
 public:
@@ -80,59 +74,44 @@ public:
     PrivateChatSession(const PrivateChatSession&)            = delete;
     PrivateChatSession& operator=(const PrivateChatSession&) = delete;
 
-    uint16_t StartAsResponder(P2PKeyType keyType = P2PKeyType::RSA_PSS);
+    uint16_t StartAsResponder(Crypto::P2PKeyType keyType = Crypto::P2PKeyType::RSA_PSS);
     void     StartAsInitiator(std::string_view peerAddress);
+    void     Close();
 
-    void Close();
+    void Send(std::string message);
+    bool OnUIRender(const std::string& ownUsername, uint32_t ownColor);
 
-    [[nodiscard]] bool IsConnected() const noexcept { return m_Connected.load(std::memory_order_acquire); }
-    [[nodiscard]] bool IsRunning() const noexcept { return m_Running.load(std::memory_order_acquire); }
-    [[nodiscard]] bool IsClosed()    const noexcept { return !m_Running.load(std::memory_order_acquire); }
+    [[nodiscard]] bool IsConnected() const noexcept { std::lock_guard lock(m_StateMutex); return m_State.IsConnected; }
+    [[nodiscard]] bool IsRunning() const noexcept { std::lock_guard lock(m_StateMutex); return m_State.IsRunning; }
+    [[nodiscard]] bool IsClosed() const noexcept { std::lock_guard lock(m_StateMutex); return !m_WindowOpen; }
     [[nodiscard]] const std::string& GetPeerUsername() const noexcept { return m_PeerUsername; }
 
-    void Send(std::string_view message);
-    std::vector<ChatEntry> BuildChatEntries(const std::string& ownUsername) const;
-    bool OnUIRender(const std::string& ownUsername, uint32_t ownColor);
-    void AppendMessage(const std::string& who, const std::string& text,
-                       uint32_t color = 0xFFFFFFFF);
-
-    /// Thread-safe: locks m_LogMutex, rebuilds cached entries, returns pointer.
-    /// The returned pointer is stable until the next call to this method.
-    /// Used by ClientLayer::RebuildConversationList().
+    void AppendMessage(const std::string& who, const std::string& text, uint32_t color = 0xFFFFFFFF);
     std::vector<ChatEntry>* RefreshAndGetChatEntries(const std::string& ownUsername);
 
 private:
-    [[nodiscard]] static std::expected<UniqueSocket, P2PError>
-        CreateListenSocket();
+    [[nodiscard]] static std::expected<UniqueSocket, P2PError> CreateListenSocket();
+    [[nodiscard]] static std::expected<UniqueSocket, P2PError> CreateAndConnectSocket(std::string_view ip, uint16_t port);
 
-    [[nodiscard]] static std::expected<UniqueSocket, P2PError>
-        CreateAndConnectSocket(std::string_view ip, uint16_t port);
+    template <typename Event>
+    void Dispatch(Event&& event);
 
-    void ResponderThreadFunc(P2PKeyType keyType);
+    [[nodiscard]] Crypto::TlsEffects CreateChatEffects();
+
     void InitiatorThreadFunc(std::string peerAddress);
-    void RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks);
+    void ResponderThreadFunc(Crypto::P2PKeyType keyType);
+    void RunLoop();
 
-    std::string   m_PeerUsername;
-    std::string   m_OwnUsername;
-    UniqueSocket  m_Socket;
+    std::string         m_PeerUsername;
+    std::string         m_OwnUsername;
+    UniqueSocket        m_Socket;
+    Crypto::TlsState    m_TlsState;
+    NetworkExecutor     m_NetworkExecutor;
 
-    std::atomic<bool> m_Running   { false };
-    std::atomic<bool> m_Connected { false };
-    NetworkExecutor   m_NetworkExecutor;
+    mutable std::mutex  m_StateMutex;
+    Crypto::ChatState   m_State;
 
-    std::vector<std::string> m_PendingOutbound;   // guarded by m_LogMutex
-
-    struct LogEntry {
-        std::string Who;
-        std::string Text;
-        uint32_t    Color;
-    };
-    std::vector<LogEntry> m_Log;
-    std::mutex            m_LogMutex;
-
-    std::array<char, 512> m_InputBuf {};
-    bool                  m_WindowOpen     = true;
-    bool                  m_ScrollToBottom = false;
+    bool                   m_WindowOpen = true; // Kept thread-safe via lock_guard where needed
     ChatPanel              m_ChatPanel;
     std::vector<ChatEntry> m_CachedEntries;
 };
