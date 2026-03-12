@@ -1,4 +1,4 @@
-#include "ApplicationGUI.h"
+#include "GuiApp.h"
 #include "Image.h"
 #include "ClientLayer.h"
 

@@ -76,8 +76,7 @@ if(NOT TARGET Botan::Botan)
                 set(_botan_type SHARED)
         elseif(EXISTS "${Botan_ROOT}/lib/libbotan-3.dylib")
                 set(_botan_lib  "${Botan_ROOT}/lib/libbotan-3.dylib")
-                set(_botan_type SHARED
-                        Core/include/P2PCredentialGenerator.h)
+                set(_botan_type SHARED)
         else()
                 message(FATAL_ERROR
                         "Cannot find Botan library under ${Botan_ROOT}/lib/\n"
@@ -99,31 +98,41 @@ endif()
 # 9. CoreLib
 # ─────────────────────────────────────────────────────────────────────────────
 add_library(CoreLib STATIC
-        Core/src/ApplicationGUI.cpp
-        Core/src/Image.cpp
-        Core/src/Random.cpp
-        Core/src/UI.cpp
-        Core/src/ConsoleGUI.cpp
-        Core/src/Log.cpp
-        Core/src/Input.cpp
-        Core/src/NetworkExecutor.cpp
-        Core/src/Client.cpp
-        Core/src/UserInfo.cpp
-        Core/src/ServerPacket.cpp
-        Core/src/StringUtils.cpp
-        Core/src/Server.cpp
-        Core/src/ApplicationConsole.cpp
-        Core/src/Console.cpp
-        Core/src/PrivateChatSession.cpp
-        Core/src/ChatPanel.cpp
-        Core/src/NetworkExecutor.cpp
-        Core/src/BotanCryptography.cpp
-        Core/src/BotanCryptographySolution.cpp
+        # ── common layer ─────────────────────────────────────────────────
+        Core/common/Image.cpp
+        Core/common/Random.cpp
+        Core/common/Log.cpp
+        Core/common/Input.cpp
+        Core/common/StringUtils.cpp
+
+        # ── infrastructure/network ───────────────────────────────────────
+        Core/infrastructure/network/NetworkExecutor.cpp
+        Core/infrastructure/network/DtlsClient.cpp
+        Core/infrastructure/network/DtlsServer.cpp
+        Core/infrastructure/network/P2PSession.cpp
+
+        # ── infrastructure/persistence ───────────────────────────────────
+        Core/infrastructure/persistence/YamlMessageStore.cpp
+
+        # ── presentation/app ──────────────────────────────────────────────
+        Core/presentation/app/GuiApp.cpp
+        Core/presentation/app/ConsoleApp.cpp
+
+        # ── presentation/views ────────────────────────────────────────────
+        Core/presentation/views/ChatView.cpp
+        Core/presentation/views/ServerConsoleView.cpp
+        Core/presentation/views/ConsoleGUIView.cpp
+
+        # ── presentation/widgets ──────────────────────────────────────────
+        Core/presentation/widgets/UIWidgets.cpp
+
+        # ── infrastructure/serialization ──────────────────────────────────
+        Core/infrastructure/serialization/PacketSerialize.cpp
 )
 
 # macOS: compile the Objective-C++ native window helper (once, outside the loop)
 if(APPLE)
-        target_sources(CoreLib PRIVATE Core/include/MacOSWindow.mm Core/include/FileDialog.mm)
+        target_sources(CoreLib PRIVATE Core/infrastructure/platform/MacOSWindow.mm Core/infrastructure/platform/FileDialog.mm)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +140,7 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 add_executable(SafiraClient
         Client/ClientApp.cpp
-        Core/src/ClientLayer.cpp
+        Core/application/client/ClientLayer.cpp
         imgui/imgui.cpp
         imgui/imgui_draw.cpp
         imgui/imgui_tables.cpp
@@ -147,7 +156,7 @@ add_executable(SafiraClient
 # ─────────────────────────────────────────────────────────────────────────────
 add_executable(SafiraServer
         Server/ServerApp.cpp
-        Core/src/ServerLayer.cpp
+        Core/application/server/ServerLayer.cpp
         imgui/imgui.cpp
         imgui/imgui_draw.cpp
         imgui/imgui_tables.cpp
@@ -165,7 +174,21 @@ set(ALL_TARGETS CoreLib SafiraClient SafiraServer)
 
 foreach(TGT IN LISTS ALL_TARGETS)
         target_include_directories(${TGT} PRIVATE
-                ${CMAKE_SOURCE_DIR}/Core/include
+                ${CMAKE_SOURCE_DIR}/Core/common
+                ${CMAKE_SOURCE_DIR}/Core/domain/types
+                ${CMAKE_SOURCE_DIR}/Core/domain/ports
+                ${CMAKE_SOURCE_DIR}/Core/domain/rules
+                ${CMAKE_SOURCE_DIR}/Core/infrastructure/serialization
+                ${CMAKE_SOURCE_DIR}/Core/infrastructure/network
+                ${CMAKE_SOURCE_DIR}/Core/infrastructure/crypto
+                ${CMAKE_SOURCE_DIR}/Core/infrastructure/persistence
+                ${CMAKE_SOURCE_DIR}/Core/infrastructure/platform
+                ${CMAKE_SOURCE_DIR}/Core/application/store
+                ${CMAKE_SOURCE_DIR}/Core/application/server
+                ${CMAKE_SOURCE_DIR}/Core/application/client
+                ${CMAKE_SOURCE_DIR}/Core/presentation/app
+                ${CMAKE_SOURCE_DIR}/Core/presentation/views
+                ${CMAKE_SOURCE_DIR}/Core/presentation/widgets
                 ${CMAKE_SOURCE_DIR}/imgui
                 ${CMAKE_SOURCE_DIR}/imgui/misc
                 ${CMAKE_SOURCE_DIR}/imgui/backends
