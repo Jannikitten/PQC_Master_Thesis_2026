@@ -112,11 +112,12 @@ public:
     /// Call from outside the network thread (UI, app shutdown).
     void Disconnect();
 
-    /// Signal-only disconnect from inside a network-thread callback.
-    /// Suppresses close_notify to avoid stale packets.
+    /// Signal the network thread to stop and disconnect gracefully.
+    /// The network thread will send close_notify before shutting down,
+    /// so the server knows the client left (critical for DTLS/UDP where
+    /// there is no TCP FIN).
     void RequestDisconnect() noexcept {
         m_Running.store(false, std::memory_order_release);
-        m_SuppressShutdown.store(true, std::memory_order_release);
     }
 
     [[nodiscard]] bool IsConnected() const noexcept {

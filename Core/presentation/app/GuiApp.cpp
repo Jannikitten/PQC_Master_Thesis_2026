@@ -372,9 +372,6 @@ static void FramePresent(ImGui_ImplVulkanH_Window* wd)
 // ═════════════════════════════════════════════════════════════════════════════
 
 namespace Safira {
-#include "Walnut-Icon.embed"
-#include "WindowImages.embed"
-
     // ─────────────────────────────────────────────────────────────────────────
     // LoadEmbeddedIcon
     // ─────────────────────────────────────────────────────────────────────────
@@ -519,12 +516,6 @@ namespace Safira {
             (void*)g_RobotoItalic, sizeof(g_RobotoItalic), 20.0f, &fontConfig);
         io.FontDefault = robotoFont;
 
-        m_AppHeaderIcon = LoadEmbeddedIcon(g_WalnutIcon,         sizeof(g_WalnutIcon));
-        m_IconMinimize  = LoadEmbeddedIcon(g_WindowMinimizeIcon, sizeof(g_WindowMinimizeIcon));
-        m_IconMaximize  = LoadEmbeddedIcon(g_WindowMaximizeIcon, sizeof(g_WindowMaximizeIcon));
-        m_IconRestore   = LoadEmbeddedIcon(g_WindowRestoreIcon,  sizeof(g_WindowRestoreIcon));
-        m_IconClose     = LoadEmbeddedIcon(g_WindowCloseIcon,    sizeof(g_WindowCloseIcon));
-
         glfwShowWindow(m_WindowHandle);
 
         // macOS: hide native title text, make titlebar transparent,
@@ -543,12 +534,6 @@ namespace Safira {
         for (const auto& layer : m_LayerStack)
             layer->OnDetach();
         m_LayerStack.clear();
-
-        m_AppHeaderIcon.reset();
-        m_IconClose.reset();
-        m_IconMinimize.reset();
-        m_IconMaximize.reset();
-        m_IconRestore.reset();
 
         const VkResult err = vkDeviceWaitIdle(g_Device);
         check_vk_result(err);

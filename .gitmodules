@@ -2,18 +2,24 @@
 	path = imgui
 	url = https://github.com/ocornut/imgui.git
 	branch = docking
+	shallow = true
 [submodule "glm"]
 	path = glm
 	url = https://github.com/g-truc/glm.git
+	shallow = true
 [submodule "spdlog"]
 	path = spdlog
 	url = https://github.com/gabime/spdlog.git
+	shallow = true
 [submodule "yaml-cpp"]
 	path = yaml-cpp
 	url = https://github.com/jbeder/yaml-cpp.git
+	shallow = true
 [submodule "wolfssl"]
 	path = wolfssl
 	url = https://github.com/Jannikitten/wolfssl.git
+	shallow = true
 [submodule "botan"]
 	path = botan
 	url = https://github.com/Jannikitten/botan.git
+	shallow = true

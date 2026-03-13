@@ -99,7 +99,7 @@ public:
     static std::string NowTimestamp();
 
     // -- Public config -------------------------------------------------------
-    std::string StatusProtocol = "DTLS 1.3 | ML-KEM-512";
+    std::string StatusProtocol = "DTLS 1.3 | ML-KEM-512 lolololol";
 
 private:
     // Sub-panels

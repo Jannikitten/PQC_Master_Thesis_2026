@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build All",
+      "dependsOn": ["Build SafiraClient", "Build SafiraServer"],
+      "dependsOrder": "parallel",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Build SafiraClient",
+      "type": "cmake",
+      "command": "build",
+      "targets": ["SafiraClient"]
+    },
+    {
+      "label": "Build SafiraServer",
+      "type": "cmake",
+      "command": "build",
+      "targets": ["SafiraServer"]
+    }
+  ]
+}

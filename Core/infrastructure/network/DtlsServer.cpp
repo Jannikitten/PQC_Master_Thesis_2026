@@ -577,6 +577,9 @@ void Server::DriveConnected(ClientInfo& client) {
         if (err == WOLFSSL_ERROR_ZERO_RETURN) {
             spdlog::info("client {} disconnected cleanly", client.AddressStr);
             client.SSL.reset();
+        } else if (err != WOLFSSL_ERROR_WANT_READ && err != WOLFSSL_ERROR_WANT_WRITE) {
+            spdlog::warn("client {} connection lost (ssl_err={})", client.AddressStr, err);
+            client.SSL.reset();
         }
         break;
     }

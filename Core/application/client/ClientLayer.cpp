@@ -1269,9 +1269,8 @@ void ClientLayer::UI_IncomingInvites() {
     const auto& state = m_Store->GetState();
     if (state.IncomingInvites.empty()) return;
 
-    const auto& invite = state.IncomingInvites.front();
-    const std::string popupId =
-        "Private Chat Request##" + invite.FromUsername;
+    const std::string fromUser = state.IncomingInvites.front().FromUsername;
+    const std::string popupId  = "Private Chat Request##" + fromUser;
 
     ImGui::OpenPopup(popupId.c_str());
 
@@ -1283,7 +1282,7 @@ void ClientLayer::UI_IncomingInvites() {
     if (ImGui::BeginPopupModal(popupId.c_str(), &open,
                                 ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("%s wants to chat with you privately.",
-                    invite.FromUsername.c_str());
+                    fromUser.c_str());
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -1302,7 +1301,7 @@ void ClientLayer::UI_IncomingInvites() {
 
         if (ImGui::Button("Accept", { btnW, 0 })) {
             Dispatch(Safira::ClientAction::RespondToPrivateChatInvite{
-                invite.FromUsername, true });
+                fromUser, true });
             ImGui::CloseCurrentPopup();
         }
 
@@ -1317,7 +1316,7 @@ void ClientLayer::UI_IncomingInvites() {
 
         if (ImGui::Button("Decline", { btnW, 0 })) {
             Dispatch(Safira::ClientAction::RespondToPrivateChatInvite{
-                invite.FromUsername, false });
+                fromUser, false });
             ImGui::CloseCurrentPopup();
         }
 
@@ -1332,7 +1331,7 @@ void ClientLayer::UI_IncomingInvites() {
 
     if (!open) {
         Dispatch(Safira::ClientAction::RespondToPrivateChatInvite{
-            invite.FromUsername, false });
+            fromUser, false });
     }
 }
 

@@ -62,7 +62,6 @@ public:
     [[nodiscard]] GLFWwindow*             GetWindowHandle()    const { return m_WindowHandle; }
     [[nodiscard]] bool                    IsTitleBarHovered()  const { return m_TitleBarHovered; }
     [[nodiscard]] bool                    IsChatPanelVisible() const { return m_ChatPanelVisible; }
-    [[nodiscard]] std::shared_ptr<Image>  GetApplicationIcon() const { return m_AppHeaderIcon; }
 
     static VkInstance       GetInstance();
     static VkPhysicalDevice GetPhysicalDevice();
@@ -131,13 +130,6 @@ private:
 
     std::mutex                         m_EventQueueMutex;
     std::queue<std::function<void()>>  m_EventQueue;
-
-    // Resources
-    std::shared_ptr<Image> m_AppHeaderIcon;
-    std::shared_ptr<Image> m_IconClose;
-    std::shared_ptr<Image> m_IconMinimize;
-    std::shared_ptr<Image> m_IconMaximize;
-    std::shared_ptr<Image> m_IconRestore;
 };
 
 /// Implemented by the application (Client or Server).

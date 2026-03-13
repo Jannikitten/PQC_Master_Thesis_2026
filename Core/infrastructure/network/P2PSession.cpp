@@ -285,8 +285,14 @@ public:
         std::string_view,
         const Botan::TLS::Policy&) override
     {
-        if (cert_chain.empty())
-            throw std::runtime_error("empty peer certificate chain");
+        // The initiator (ClientCredentials) does not present a client
+        // certificate, so the chain will be empty on the responder side.
+        // Accept this for now — mutual authentication is a Phase-2 goal.
+        if (cert_chain.empty()) {
+            spdlog::info("[P2P] Peer {} presented no client certificate — skipping verification",
+                         m_PeerUsername);
+            return;
+        }
 
         const std::string expectedCN = SanitizeIdentityName(m_PeerUsername);
         const std::string certCN = cert_chain.front().subject_dn().get_first_attribute("X520.CommonName");

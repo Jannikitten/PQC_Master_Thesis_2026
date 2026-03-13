@@ -1,0 +1,30 @@
+{
+  "files.exclude": {
+    "cmake-build-*": true,
+    "botan": true,
+    "wolfssl": true,
+    "glm": true,
+    "imgui": true,
+    "spdlog": true,
+    "yaml-cpp": true
+  },
+  "files.watcherExclude": {
+    "cmake-build-*/**": true,
+    ".git/modules/**": true,
+    "botan/**": true,
+    "wolfssl/**": true,
+    "glm/**": true,
+    "imgui/**": true,
+    "spdlog/**": true,
+    "yaml-cpp/**": true
+  },
+  "search.exclude": {
+    "cmake-build-*": true,
+    "botan": true,
+    "wolfssl": true,
+    "glm": true,
+    "imgui": true,
+    "spdlog": true,
+    "yaml-cpp": true
+  }
+}

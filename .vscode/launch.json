@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Client 1",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/SafiraClient",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build SafiraClient"
+    },
+    {
+      "name": "Client 2",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/SafiraClient",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build SafiraClient"
+    },
+    {
+      "name": "Server",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/SafiraServer",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build SafiraServer"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "2 Clients + 1 Server",
+      "configurations": ["Server", "Client 1", "Client 2"]
+    }
+  ]
+}
