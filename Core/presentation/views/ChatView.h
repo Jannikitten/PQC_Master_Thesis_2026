@@ -13,12 +13,12 @@
 
 #include <imgui.h>
 #include "Theme.h"
+#include "ChatTypes.h"
+#include "UserListView.h"
+#include "ConversationListView.h"
 
-#include <cstdint>
 #include <functional>
 #include <optional>
-#include <string>
-#include <vector>
 
 struct ImDrawList;
 struct ImFont;
@@ -26,33 +26,40 @@ struct ImFont;
 namespace Safira {
 
 // -----------------------------------------------------------------------------
-// Data model
-// -----------------------------------------------------------------------------
-
-enum class MessageRole : uint8_t { Own, Peer, System };
-
-struct ChatEntry {
-    std::string  Who;
-    std::string  Text;
-    uint32_t     Color     = 0xFFFFFFFF;
-    MessageRole  Role      = MessageRole::Peer;
-    std::string  Time;              // "HH:MM" -- must be set at creation!
-    ImTextureID  AvatarTex = {};        // per-message avatar image (or 0/null)
-};
-
-struct ConversationInfo {
-    std::string              Title;
-    std::string              Preview;
-    std::string              TimeLabel;
-    std::vector<ChatEntry>*  Messages   = nullptr;
-    bool                     HasUnread  = false;
-    ImTextureID              AvatarTex  = {};     // sidebar avatar for this convo
-};
-
-// -----------------------------------------------------------------------------
 // Chat-specific palette is now in Theme.h (Safira::ThemeData)
 // Access via: const auto& t = Safira::Theme::Get();
 // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Full-layout input / output structs
+// -----------------------------------------------------------------------------
+
+struct FullLayoutInput {
+    // Sidebar — user list
+    std::vector<UserListEntry>           Users;
+    // Sidebar — conversations
+    const std::vector<ConversationInfo>* Conversations = nullptr;
+    int                                  ActiveConvoIdx = 0;
+    // Chat area
+    bool              IsConnected    = false;
+    bool              IsHandshaking  = false;
+    bool              IsPrivateChat  = false;
+    std::string       ConvoTitle;
+    std::string       PeerName;
+    std::string       StatusProtocol;
+    ImTextureID       OwnAvatar      = {};
+    ImTextureID       PeerAvatar     = {};
+    std::string       Username;
+    std::vector<ChatEntry>* Messages = nullptr;
+    // Overlay
+    bool              SuppressOverlay = false;
+};
+
+struct FullLayoutOutput {
+    std::optional<int>         NewActiveIdx;
+    std::optional<std::string> PendingMessage;
+    bool                       LeaveRequested = false;
+};
 
 // -----------------------------------------------------------------------------
 // ChatPanel
@@ -62,11 +69,8 @@ class ChatPanel {
 public:
     ChatPanel();
 
-    // -- Full-window mode (sidebar + chat area) ------------------------------
-    std::optional<int> RenderFullLayout(
-        std::vector<ConversationInfo>& conversations,
-        int                            activeIdx,
-        const std::string&             ownUsername);
+    // -- Full-window mode (users + conversations sidebar + chat area) ---------
+    FullLayoutOutput RenderFullLayout(const FullLayoutInput& input);
 
     // -- Standalone chat area (no sidebar) -----------------------------------
     void RenderChatArea(
@@ -76,35 +80,28 @@ public:
         bool                    connected,
         bool                    handshaking);
 
-    // -- Outbound message retrieval ------------------------------------------
-    [[nodiscard]] std::optional<std::string> ConsumePendingMessage();
-
     // -- Scroll control -------------------------------------------------------
     void RequestScrollToBottom() { m_ScrollToBottom = true; }
 
-    // -- Callbacks -----------------------------------------------------------
-    using Callback = std::function<void()>;
-    void SetNewConversationCallback(Callback fn) { m_OnNewConversation = std::move(fn); }
-    void SetOnLeaveCallback(Callback fn)         { m_OnLeave = std::move(fn); }
+    // -- Sub-view access (for callback wiring) --------------------------------
+    UserListView& GetUserListView() { return m_UserListView; }
 
-    // -- Private chat mode ---------------------------------------------------
-    void SetPrivateChatMode(bool enabled) { m_PrivateMode = enabled; }
-    bool IsPrivateChatMode() const        { return m_PrivateMode; }
-
-    // -- Avatar textures (for header and own messages) -----------------------
-    void SetPeerAvatar(ImTextureID tex)   { m_PeerAvatarTex = tex; }
-    void SetOwnAvatar(ImTextureID tex)    { m_OwnAvatarTex = tex; }
+    // -- Outbound message retrieval ------------------------------------------
+    [[nodiscard]] std::optional<std::string> ConsumePendingMessage();
 
     // -- Timestamp utility (call at message creation, NOT at render) ----------
     static std::string NowTimestamp();
 
-    // -- Public config -------------------------------------------------------
-    std::string StatusProtocol = "DTLS 1.3 | ML-KEM-512 lolololol";
-
 private:
-    // Sub-panels
-    int  RenderSidebar(std::vector<ConversationInfo>& convos, int activeIdx,
-                       float width, float height);
+    // Layout sub-sections
+    void RenderSidebar(const FullLayoutInput& input, float sideW, float height,
+                       FullLayoutOutput& out);
+    void RenderChatSection(const FullLayoutInput& input, float chatW,
+                           float height, FullLayoutOutput& out);
+    void RenderSeparatorOverlay(ImVec2 origin, float width, float height,
+                                float sideW, bool visible);
+
+    // Chat area internals
     void RenderMessages(std::vector<ChatEntry>& messages, float width,
                         float height, const std::string& ownUsername);
     void RenderInputBar(float areaWidth, const std::string& ownUsername);
@@ -118,6 +115,11 @@ private:
                     char letter, ImU32 bgCol, ImU32 textCol,
                     ImTextureID tex = {});
 
+
+    // Sub-views
+    UserListView         m_UserListView;
+    ConversationListView m_ConversationListView;
+
     // State
     static constexpr std::size_t kInputBufSize = 4096;
     char                       m_InputBuf[kInputBufSize] {};
@@ -129,8 +131,12 @@ private:
     ImTextureID m_PeerAvatarTex = {};
     ImTextureID m_OwnAvatarTex  = {};
 
-    Callback m_OnNewConversation;
+    bool m_LeaveRequested = false;
+
+    using Callback = std::function<void()>;
     Callback m_OnLeave;
+
+    std::string StatusProtocol;
 
     // Layout constants
     static constexpr float kSidebarWidth   = 260.0f;

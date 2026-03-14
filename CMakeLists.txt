@@ -122,6 +122,12 @@ add_library(CoreLib STATIC
         Core/presentation/views/ChatView.cpp
         Core/presentation/views/ServerConsoleView.cpp
         Core/presentation/views/ConsoleGUIView.cpp
+        Core/presentation/views/ConnectionView.cpp
+        Core/presentation/views/UserListView.cpp
+        Core/presentation/views/ConversationListView.cpp
+
+        # ── presentation/services ─────────────────────────────────────────
+        Core/presentation/services/AvatarManager.cpp
 
         # ── presentation/widgets ──────────────────────────────────────────
         Core/presentation/widgets/UIWidgets.cpp
@@ -188,6 +194,7 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 ${CMAKE_SOURCE_DIR}/Core/application/client
                 ${CMAKE_SOURCE_DIR}/Core/presentation/app
                 ${CMAKE_SOURCE_DIR}/Core/presentation/views
+                ${CMAKE_SOURCE_DIR}/Core/presentation/services
                 ${CMAKE_SOURCE_DIR}/Core/presentation/widgets
                 ${CMAKE_SOURCE_DIR}/imgui
                 ${CMAKE_SOURCE_DIR}/imgui/misc

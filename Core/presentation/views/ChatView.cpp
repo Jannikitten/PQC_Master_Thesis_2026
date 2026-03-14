@@ -1,5 +1,6 @@
 #include "ChatView.h"
 #include "GuiApp.h"
+#include "SidebarHelpers.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -62,46 +63,64 @@ static void DrawTextAt(ImFont* f, ImVec2 pos, ImU32 col,
 ChatPanel::ChatPanel() = default;
 
 // ===========================================================================
-// RenderFullLayout
+// RenderFullLayout — complete chat window: sidebar (users + conversations)
+//                    + chat area + separator overlay
 // ===========================================================================
 
-std::optional<int> ChatPanel::RenderFullLayout(
-    std::vector<ConversationInfo>& conversations,
-    int activeIdx, const std::string& ownUsername)
-{
+FullLayoutOutput ChatPanel::RenderFullLayout(const FullLayoutInput& input) {
+    FullLayoutOutput out;
+
+    const ImVec2 outerAvail = ImGui::GetContentRegionAvail();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Get().PanelBgVec4());
+    ImGui::BeginChild("##ChatPanel", outerAvail, false,
+                       ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+
+    int activeIdx = input.ActiveConvoIdx;
+    if (input.Conversations &&
+        activeIdx >= static_cast<int>(input.Conversations->size()))
+        activeIdx = std::max(0,
+            static_cast<int>(input.Conversations->size()) - 1);
+
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const float sideW = kSidebarWidth;
+    constexpr float sideW = 260.0f;
     const float chatW = avail.x - sideW;
 
-    int newIdx = RenderSidebar(conversations, activeIdx, sideW, avail.y);
-    ImGui::SameLine(0.0f, 0.0f);
+    // -- Left sidebar --------------------------------------------------------
+    RenderSidebar(input, sideW, avail.y, out);
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, U32ToVec4(Theme::Get().BgPanel));
-    ImGui::BeginChild("##ChatArea", { chatW, avail.y }, false,
-                      ImGuiWindowFlags_NoScrollbar);
-
-    if (activeIdx >= 0 && activeIdx < (int)conversations.size()
-        && conversations[activeIdx].Messages)
+    // Sidebar vertical separator
     {
-        auto& convo = conversations[activeIdx];
-        ImGui::SetCursorPos({ 14.0f, 8.0f });
-        RenderStatusIndicator(true, false, convo.Title);
-        float msgH = ImGui::GetContentRegionAvail().y - kInputBarHeight - 8.0f;
-        RenderMessages(*convo.Messages, chatW, msgH, ownUsername);
-        RenderInputBar(chatW, ownUsername);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 sidebarEnd = ImGui::GetCursorScreenPos();
+        float panelTop = sidebarEnd.y - avail.y;
+        dl->AddLine({ sidebarEnd.x, panelTop },
+                    { sidebarEnd.x, panelTop + avail.y },
+                    Theme::Get().Separator, 1.0f);
+    }
+    ImGui::PopStyleColor(); // sidebar ChildBg
+
+    // -- Right chat area -----------------------------------------------------
+    ImGui::SameLine(0.0f, 0.0f);
+    RenderChatSection(input, chatW, avail.y, out);
+
+    // -- Separator overlay ---------------------------------------------------
+    RenderSeparatorOverlay(ImGui::GetWindowPos(), avail.x, avail.y,
+                           sideW, !input.SuppressOverlay);
+
+    ImGui::EndChild(); // ##ChatPanel
+
+    // Resolve new active index
+    if (out.NewActiveIdx && *out.NewActiveIdx != input.ActiveConvoIdx) {
+        // keep it
     } else {
-        const char* sub = "Select a conversation or start a new one.";
-        ImFont* body = GetBodyFont();
-        ImVec2 sSz = MeasureText(body, sub);
-        ImGui::SetCursorPos({ (chatW - sSz.x) * 0.5f, avail.y * 0.45f });
-        ImGui::TextColored(U32ToVec4(Theme::Get().TextMuted), "%s", sub);
+        out.NewActiveIdx = std::nullopt;
     }
 
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    if (newIdx != activeIdx) return newIdx;
-    return std::nullopt;
+    return out;
 }
 
 // ===========================================================================
@@ -126,115 +145,139 @@ void ChatPanel::RenderChatArea(
 }
 
 // ===========================================================================
-// Sidebar
+// RenderSidebar — user list + divider + conversation list
 // ===========================================================================
 
-int ChatPanel::RenderSidebar(std::vector<ConversationInfo>& convos,
-                             int activeIdx, float width, float height) {
-    int result = activeIdx;
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, U32ToVec4(Theme::Get().BgPanel));
-    ImGui::BeginChild("##ChatSidebar", { width, height }, false,
+void ChatPanel::RenderSidebar(const FullLayoutInput& input, float sideW,
+                               float height, FullLayoutOutput& out) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Get().PanelBgVec4());
+    ImGui::BeginChild("##Sidebar", { sideW, height }, false,
                       ImGuiWindowFlags_NoScrollbar);
-
-    const float pad = 14.0f;
-    ImGui::SetCursorPos({ pad, pad });
-
-    ImFont* bold = GetBoldFont();
-    if (bold) ImGui::PushFont(bold);
-    ImGui::TextColored(U32ToVec4(Theme::Get().TextPrimary), "Conversations");
-    if (bold) ImGui::PopFont();
-
-    ImGui::SameLine(width - pad - 26.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button,       U32ToVec4(Theme::Get().Accent));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, U32ToVec4(Theme::Get().AccentHover));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  U32ToVec4(Theme::Get().AccentHover));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 13.0f);
-    if (ImGui::Button("+", { 26.0f, 26.0f })) {
-        if (m_OnNewConversation) m_OnNewConversation();
-    }
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor(3);
 
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
+    constexpr float pad = 14.0f;
+
+    // -- User list section ---------------------------------------------------
+    const float userListH = std::min(
+        static_cast<float>(input.Users.size()) * 26.0f + 36.0f,
+        height * 0.35f);
+
+    ImGui::SetCursorPos({ 0, 0 });
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+    ImGui::BeginChild("##UserSection", { sideW, userListH }, false);
+    ImGui::PopStyleVar();
+    ImGui::SetCursorPos({ pad, 8.0f });
+
+    m_UserListView.Render(input.Users, sideW);
+    ImGui::EndChild();
+
+    // -- Divider -------------------------------------------------------------
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p = ImGui::GetCursorScreenPos();
-        dl->AddLine({ p.x + pad, p.y }, { p.x + width - pad, p.y },
+        dl->AddLine({ p.x + pad, p.y },
+                    { p.x + sideW - pad, p.y },
                     Theme::Get().Divider, 1.0f);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
     }
 
-    ImGui::BeginChild("##ConvoList", { 0, 0 }, false);
-    ImFont* body = GetBodyFont();
-
-    for (int i = 0; i < (int)convos.size(); ++i) {
-        const auto& c = convos[i];
-        const bool selected = (i == activeIdx);
-        ImGui::PushID(i);
-
-        ImVec2 cursor = ImGui::GetCursorScreenPos();
-        ImVec2 itemSz = { width - 4.0f, 58.0f };
-
-        bool hovered = ImGui::IsMouseHoveringRect(
-            cursor, { cursor.x + itemSz.x, cursor.y + itemSz.y });
-
-        ImU32 bg = 0;
-        if (selected)     bg = Theme::Get().BgItemSelected;
-        else if (hovered) bg = Theme::Get().BgItemHovered;
-        if (bg)
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                cursor, { cursor.x + itemSz.x, cursor.y + itemSz.y }, bg, 6.0f);
-
-        if (ImGui::InvisibleButton("##c", itemSz))
-            result = i;
-
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float tx = cursor.x + pad;
-
-        // Avatar -- use conversation texture if available
-        // FIX 3: Non-lobby avatars use purple (SendBtn) instead of gold (Accent)
-        float ax = tx + kAvatarRadius;
-        float ay = cursor.y + itemSz.y * 0.5f;
-        char letter = c.Title.empty() ? '?' : (char)toupper(c.Title[0]);
-
-        ImU32 avatarBg = (i == 0)
-            ? Theme::Get().LobbyAvatar
-            : Theme::Get().SendBtn;
-
-        DrawAvatar(dl, ax, ay, kAvatarRadius, letter,
-                   avatarBg, Theme::Get().SendBtnText, c.AvatarTex);
-
-        float textX = tx + kAvatarRadius * 2.0f + 10.0f;
-
-        DrawTextAt(bold, { textX, cursor.y + 10.0f },
-                   Theme::Get().TextPrimary, c.Title.c_str());
-
-        std::string preview = c.Preview.substr(0, 32);
-        if (c.Preview.size() > 32) preview += "...";
-        DrawTextAt(body, { textX, cursor.y + 30.0f },
-                   Theme::Get().TextSecondary, preview.c_str());
-
-        if (!c.TimeLabel.empty()) {
-            ImVec2 tSz = MeasureText(body, c.TimeLabel.c_str());
-            DrawTextAt(body,
-                { cursor.x + width - pad - tSz.x - 4.0f, cursor.y + 12.0f },
-                Theme::Get().TextMuted, c.TimeLabel.c_str());
-        }
-
-        if (c.HasUnread)
-            dl->AddCircleFilled(
-                { cursor.x + width - pad - 4.0f, cursor.y + itemSz.y * 0.5f },
-                4.0f, Theme::Get().UnreadDot, 12);
-
-        ImGui::SetCursorScreenPos({ cursor.x, cursor.y + itemSz.y });
-        ImGui::PopID();
+    // -- Conversation list ---------------------------------------------------
+    if (input.Conversations) {
+        ImGui::BeginChild("##ConvoList", { 0, 0 }, false);
+        if (auto newIdx = m_ConversationListView.Render(
+                *input.Conversations, input.ActiveConvoIdx, sideW))
+            out.NewActiveIdx = *newIdx;
+        ImGui::EndChild();
     }
 
-    ImGui::EndChild();
-    ImGui::EndChild();
+    ImGui::EndChild(); // ##Sidebar
+}
+
+// ===========================================================================
+// RenderChatSection — right-side chat area
+// ===========================================================================
+
+void ChatPanel::RenderChatSection(const FullLayoutInput& input, float chatW,
+                                   float height, FullLayoutOutput& out) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Get().PanelBgVec4());
+    ImGui::BeginChild("##ChatArea", { chatW, height }, false,
+                      ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
+
+    if (input.Messages) {
+        // Configure private/lobby mode
+        m_PrivateMode   = input.IsPrivateChat;
+        m_PeerAvatarTex = input.PeerAvatar;
+        m_OwnAvatarTex  = input.OwnAvatar;
+        StatusProtocol  = input.StatusProtocol;
+
+        // Wire leave callback to flag
+        m_LeaveRequested = false;
+        if (input.IsPrivateChat) {
+            m_OnLeave = [this]() { m_LeaveRequested = true; };
+        } else {
+            m_OnLeave = nullptr;
+        }
+
+        ImGui::SetCursorPos({ 14.0f, 8.0f });
+
+        RenderChatArea(*input.Messages, input.Username, input.ConvoTitle,
+                       input.IsConnected, input.IsHandshaking);
+
+        if (auto msg = ConsumePendingMessage())
+            out.PendingMessage = std::move(msg);
+
+        if (m_LeaveRequested)
+            out.LeaveRequested = true;
+    } else {
+        const char* sub = "Select a conversation or start a new one.";
+        ImVec2 sSz = ImGui::CalcTextSize(sub);
+        ImGui::SetCursorPos({ (chatW - sSz.x) * 0.5f, height * 0.45f });
+        ImGui::TextColored({ 0.45f, 0.45f, 0.45f, 1.0f }, "%s", sub);
+    }
+
+    ImGui::EndChild(); // ##ChatArea
     ImGui::PopStyleColor();
-    return result;
+}
+
+// ===========================================================================
+// RenderSeparatorOverlay — top + vertical separator lines
+// ===========================================================================
+
+void ChatPanel::RenderSeparatorOverlay(ImVec2 origin, float width,
+                                        float height, float sideW,
+                                        bool visible) {
+    if (!visible) return;
+    if (ImGui::IsPopupOpen("Report User##ReportModal")) return;
+
+    const ImU32 lineCol = Theme::Get().Separator;
+
+    ImGui::SetNextWindowPos(origin);
+    ImGui::SetNextWindowSize({ width, height });
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+
+    ImGuiWindowFlags lineFlags =
+          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+        | ImGuiWindowFlags_NoResize     | ImGuiWindowFlags_NoNav
+        | ImGuiWindowFlags_NoDocking    | ImGuiWindowFlags_NoInputs
+        | ImGuiWindowFlags_NoFocusOnAppearing
+        | ImGuiWindowFlags_NoSavedSettings;
+
+    if (ImGui::Begin("##SeparatorOverlay", nullptr, lineFlags)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddLine(origin, { origin.x + width, origin.y },
+                    lineCol, 1.0f);
+        dl->AddLine({ origin.x + sideW, origin.y },
+                    { origin.x + sideW, origin.y + height },
+                    lineCol, 1.0f);
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 // ===========================================================================
