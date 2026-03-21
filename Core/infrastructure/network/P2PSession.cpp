@@ -1,12 +1,12 @@
 #include "P2PSession.h"
+#include "BotanP2PCrypto.h"
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PrivateChatSession.cpp
+// PrivateChatSession.cpp — peer-to-peer chat with optional TLS encryption
 //
-// §3.2   Result types     – std::expected for socket creation pipelines
-// §5.5   Secret lifetimes – UniqueSocket RAII for file descriptors
-// §5.5   Opinionated API  – string_view parameters, no throwing port parse
-// C++23                   – std::array, from_chars, ranges::find, string_view
+// When BotanP2PCrypto is available and initialised, the TCP stream is
+// wrapped in TLS 1.3 (X25519/ML-KEM-768).  Otherwise, messages are sent
+// as plaintext over TCP and a warning is displayed.
 // ═════════════════════════════════════════════════════════════════════════════
 
 #include <algorithm>
@@ -14,28 +14,10 @@
 #include <charconv>
 #include <chrono>
 #include <cerrno>
-#include <filesystem>
-#include <fstream>
 #include <format>
 #include <mutex>
 #include <ranges>
-#include <sstream>
-#include <stdexcept>
 #include <thread>
-#include <unordered_map>
-
-#include <botan/auto_rng.h>
-#include <botan/certstor.h>
-#include <botan/tls.h>
-#include <botan/tls_callbacks.h>
-#include <botan/tls_channel.h>
-#include <botan/tls_client.h>
-#include <botan/tls_policy.h>
-#include <botan/tls_server.h>
-#include <botan/tls_server_info.h>
-#include <botan/tls_session_manager_memory.h>
-#include <botan/tls_signature_scheme.h>
-#include <botan/x509cert.h>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -46,71 +28,6 @@
 #include <spdlog/spdlog.h>
 
 namespace Safira {
-
-namespace {
-enum class PinVerificationStatus : uint8_t {
-    Match,
-    TrustedFirstUse,
-    Mismatch,
-};
-
-struct PinVerificationResult {
-    PinVerificationStatus Status = PinVerificationStatus::Mismatch;
-    std::string Fingerprint;
-};
-
-[[nodiscard]] std::filesystem::path GetPeerPinStorePath() {
-    return GetSafiraDataDir() / "KnownPeerFingerprints.txt";
-}
-
-[[nodiscard]] std::unordered_map<std::string, std::string> LoadPeerPins() {
-    std::unordered_map<std::string, std::string> pins;
-    std::ifstream in(GetPeerPinStorePath());
-    if (!in)
-        return pins;
-
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
-        std::istringstream iss(line);
-        std::string user;
-        std::string fp;
-        if (!(iss >> user >> fp))
-            continue;
-        pins[user] = fp;
-    }
-    return pins;
-}
-
-void SavePeerPins(const std::unordered_map<std::string, std::string>& pins) {
-    const auto path = GetPeerPinStorePath();
-    std::ofstream out(path, std::ios::trunc);
-    for (const auto& [user, fp] : pins)
-        out << user << ' ' << fp << '\n';
-    out.flush();
-    HardenFilePermissions(path);
-}
-
-[[nodiscard]] PinVerificationResult VerifyOrTrustPeerFingerprint(const std::string& peerUsername,
-                                                                 const std::string& fingerprint) {
-    static std::mutex s_PinMutex;
-    std::lock_guard lock(s_PinMutex);
-
-    auto pins = LoadPeerPins();
-    if (const auto it = pins.find(peerUsername); it != pins.end()) {
-        return {
-            .Status = (it->second == fingerprint)
-                ? PinVerificationStatus::Match
-                : PinVerificationStatus::Mismatch,
-            .Fingerprint = it->second,
-        };
-    }
-
-    pins[peerUsername] = fingerprint;
-    SavePeerPins(pins);
-    return { .Status = PinVerificationStatus::TrustedFirstUse, .Fingerprint = fingerprint };
-}
-} // namespace
 
 // ═════════════════════════════════════════════════════════════════════════════
 // UniqueSocket
@@ -123,212 +40,8 @@ void UniqueSocket::Reset() noexcept {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// PQ TLS 1.3 Policy
-// ═════════════════════════════════════════════════════════════════════════════
-
-class PQPolicy : public Botan::TLS::Default_Policy {
-public:
-    [[nodiscard]] Botan::TLS::Protocol_Version min_version() const {
-        return Botan::TLS::Protocol_Version::TLS_V13;
-    }
-
-    [[nodiscard]] std::vector<Botan::TLS::Group_Params>
-    key_exchange_groups() const override {
-        return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
-    }
-
-    [[nodiscard]] std::vector<Botan::TLS::Group_Params>
-    key_exchange_groups_to_offer() const override {
-        return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
-    }
-
-    [[nodiscard]] bool require_cert_revocation_info() const override { return false; }
-
-    [[nodiscard]] std::vector<Botan::TLS::Signature_Scheme>
-    allowed_signature_schemes() const override {
-        return {
-            Botan::TLS::Signature_Scheme::RSA_PSS_SHA256,
-            Botan::TLS::Signature_Scheme::RSA_PSS_SHA384,
-            Botan::TLS::Signature_Scheme::RSA_PSS_SHA512,
-            Botan::TLS::Signature_Scheme::ECDSA_SHA256,
-            Botan::TLS::Signature_Scheme::ECDSA_SHA384,
-            Botan::TLS::Signature_Scheme::ECDSA_SHA512,
-            // Phase 2 TODO: Botan::TLS::Signature_Scheme::ML_DSA_65,
-            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA256,
-            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA384,
-            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA512,
-        };
-    }
-};
-
-// ═════════════════════════════════════════════════════════════════════════════
-// ServerCredentials
-//
-// Botan 3 API: cert_chain() → find_cert_chain(),
-//              Private_Key* → shared_ptr<Private_Key>
-// ═════════════════════════════════════════════════════════════════════════════
-
-class ServerCredentials : public Botan::Credentials_Manager {
-public:
-    explicit ServerCredentials(const P2PKeyMaterial& km)
-        : m_Key(km.Key), m_Cert(km.Cert) {}
-
-    std::vector<Botan::X509_Certificate> find_cert_chain(
-        const std::vector<std::string>& cert_key_types,
-        const std::vector<Botan::AlgorithmIdentifier>&,
-        const std::vector<Botan::X509_DN>&,
-        const std::string& type,
-        const std::string&) override
-    {
-        if (type == "tls-server") {
-            const std::string our_key_type = m_Key->algo_name();
-            if (cert_key_types.empty()
-                || std::ranges::find(cert_key_types, our_key_type) != cert_key_types.end())
-                return { *m_Cert };
-        }
-        return {};
-    }
-
-    std::shared_ptr<Botan::Private_Key> private_key_for(
-        const Botan::X509_Certificate&,
-        const std::string&,
-        const std::string&) override
-    {
-        return m_Key;
-    }
-
-private:
-    std::shared_ptr<Botan::Private_Key>      m_Key;
-    std::shared_ptr<Botan::X509_Certificate> m_Cert;
-};
-
-// ═════════════════════════════════════════════════════════════════════════════
-// ClientCredentials — Phase 1: no cert verification
-// ═════════════════════════════════════════════════════════════════════════════
-
-class ClientCredentials : public Botan::Credentials_Manager {
-public:
-    std::vector<Botan::Certificate_Store*> trusted_certificate_authorities(
-        const std::string&, const std::string&) override
-    {
-        return {};
-    }
-};
-
-// ═════════════════════════════════════════════════════════════════════════════
-// P2PCallbacks — Botan TLS channel callbacks
-//
-// Defined inside namespace Safira to match the forward-declaration in the
-// header.
-// ═════════════════════════════════════════════════════════════════════════════
-
-class P2PCallbacks : public Botan::TLS::Callbacks {
-public:
-    P2PCallbacks(int socket, PrivateChatSession& owner, std::string peerUsername)
-        : m_Socket(socket)
-        , m_Owner(owner)
-        , m_PeerUsername(std::move(peerUsername)) {}
-
-    void tls_emit_data(std::span<const uint8_t> data) override {
-        std::size_t total = 0;
-        while (total < data.size()) {
-            const ssize_t sent = ::send(
-                m_Socket,
-                data.data() + total,
-                data.size() - total, 0);
-            if (sent <= 0) {
-                spdlog::error("[P2P] tls_emit_data: send() failed");
-                return;
-            }
-            total += static_cast<std::size_t>(sent);
-        }
-    }
-
-    void tls_record_received(uint64_t /*seq_no*/,
-                             std::span<const uint8_t> data) override {
-        m_Owner.AppendMessage(
-            m_PeerUsername,
-            std::string(reinterpret_cast<const char*>(data.data()), data.size()));
-    }
-
-    void tls_alert(Botan::TLS::Alert alert) override {
-        if (alert.type() == Botan::TLS::Alert::CloseNotify) {
-            m_Owner.AppendMessage("System",
-                std::format("{} closed the connection.", m_PeerUsername),
-                0xFF888888);
-            m_CloseNotifyReceived = true;
-        } else {
-            spdlog::warn("[P2P] TLS alert: {}", alert.type_string());
-        }
-    }
-
-    void tls_session_activated() override {
-        spdlog::info("[P2P] TLS 1.3 + X25519/ML-KEM-768 handshake complete with {}",
-                     m_PeerUsername);
-        m_Owner.AppendMessage("System",
-            std::format("Connected to {} (Botan TLS 1.3 | X25519/ML-KEM-768)", m_PeerUsername),
-            0xFF66CC66);
-        if (m_FirstUseTrusted) {
-            m_Owner.AppendMessage("System",
-                std::format("First trusted fingerprint for {}: {}", m_PeerUsername, m_FirstUseFingerprint),
-                0xFFCCAA66);
-        }
-        m_Activated = true;
-    }
-
-    void tls_verify_cert_chain(
-        const std::vector<Botan::X509_Certificate>& cert_chain,
-        const std::vector<std::optional<Botan::OCSP::Response>>&,
-        const std::vector<Botan::Certificate_Store*>&,
-        Botan::Usage_Type,
-        std::string_view,
-        const Botan::TLS::Policy&) override
-    {
-        // The initiator (ClientCredentials) does not present a client
-        // certificate, so the chain will be empty on the responder side.
-        // Accept this for now — mutual authentication is a Phase-2 goal.
-        if (cert_chain.empty()) {
-            spdlog::info("[P2P] Peer {} presented no client certificate — skipping verification",
-                         m_PeerUsername);
-            return;
-        }
-
-        const std::string expectedCN = SanitizeIdentityName(m_PeerUsername);
-        const std::string certCN = cert_chain.front().subject_dn().get_first_attribute("X520.CommonName");
-        if (certCN.empty())
-            throw std::runtime_error("peer certificate missing common name");
-        if (certCN != expectedCN) {
-            throw std::runtime_error(
-                std::format("peer identity mismatch (expected '{}', got '{}')", expectedCN, certCN));
-        }
-
-        const std::string fp = cert_chain.front().fingerprint("SHA-256");
-        const auto pinResult = VerifyOrTrustPeerFingerprint(m_PeerUsername, fp);
-        if (pinResult.Status == PinVerificationStatus::Mismatch)
-            throw std::runtime_error("peer certificate fingerprint mismatch");
-        if (pinResult.Status == PinVerificationStatus::TrustedFirstUse) {
-            m_FirstUseTrusted = true;
-            m_FirstUseFingerprint = fp;
-            spdlog::warn("[P2P] First-use trust for {} fingerprint {}", m_PeerUsername, fp);
-        }
-    }
-
-    [[nodiscard]] bool IsActivated()           const noexcept { return m_Activated; }
-    [[nodiscard]] bool IsCloseNotifyReceived() const noexcept { return m_CloseNotifyReceived; }
-
-private:
-    int                 m_Socket;
-    PrivateChatSession& m_Owner;
-    std::string         m_PeerUsername;
-    bool                m_Activated           = false;
-    bool                m_CloseNotifyReceived = false;
-    bool                m_FirstUseTrusted     = false;
-    std::string         m_FirstUseFingerprint;
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Address parsing — from_chars instead of std::stoi (no-throw, §3.2)
+// Address parsing
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct ParsedAddr {
@@ -354,7 +67,7 @@ static std::expected<ParsedAddr, P2PError> ParsePeerAddress(std::string_view add
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §3.2 — Socket init helpers returning std::expected  (Slides 88-89)
+// Socket helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
 std::expected<UniqueSocket, P2PError>
@@ -368,7 +81,7 @@ PrivateChatSession::CreateListenSocket() {
 
     sockaddr_in local{
         .sin_family = AF_INET,
-        .sin_port   = 0,           // OS picks an ephemeral port
+        .sin_port   = 0,
         .sin_addr   = { .s_addr = INADDR_ANY },
         .sin_zero   = {},
     };
@@ -414,13 +127,76 @@ PrivateChatSession::PrivateChatSession(std::string own, std::string peer)
 PrivateChatSession::~PrivateChatSession() { Close(); }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// StartAsResponder
-//
-// Uses the std::expected init helper.  On failure the UniqueSocket inside
-// the expected is destroyed, closing the fd — no leak.
+// SetupEncryption — tries to create and start BotanP2PCrypto
 // ═════════════════════════════════════════════════════════════════════════════
 
-uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
+bool PrivateChatSession::SetupEncryption(bool isResponder) {
+    try {
+        m_Crypto = std::make_unique<BotanP2PCrypto>();
+
+        BotanP2PCrypto::Config cfg{
+            .SocketFd    = m_Socket.Get(),
+            .IsResponder = isResponder,
+            .OwnUsername = m_OwnUsername,
+            .PeerUsername = m_PeerUsername,
+        };
+
+        BotanP2PCrypto::Callbacks cbs{
+            .EmitData = [this](std::span<const uint8_t> data) {
+                SendRaw(data);
+            },
+            .MessageReceived = [this](const std::string& from,
+                                      const std::string& text,
+                                      uint32_t color) {
+                AppendMessage(from, text, color);
+            },
+            .Activated = [this]() {
+                m_Connected.store(true, std::memory_order_release);
+                AppendMessage("System",
+                    std::format("Encrypted connection established with {} (TLS 1.3 | X25519/ML-KEM-768)",
+                                m_PeerUsername),
+                    0xFF66CC66);
+            },
+            .Closed = [this](const std::string& msg) {
+                AppendMessage("System", msg, 0xFF888888);
+            },
+        };
+
+        m_Crypto->Start(cfg, std::move(cbs));
+        m_Encrypted.store(true, std::memory_order_release);
+        return true;
+    } catch (const std::exception& ex) {
+        spdlog::warn("[P2P] Encryption setup failed: {} — falling back to plaintext", ex.what());
+        m_Crypto.reset();
+        m_Encrypted.store(false, std::memory_order_release);
+        return false;
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SendRaw — write raw bytes to the TCP socket
+// ═════════════════════════════════════════════════════════════════════════════
+
+void PrivateChatSession::SendRaw(std::span<const uint8_t> data) {
+    std::size_t total = 0;
+    while (total < data.size()) {
+        const ssize_t sent = ::send(
+            m_Socket.Get(),
+            data.data() + total,
+            data.size() - total, 0);
+        if (sent <= 0) {
+            spdlog::error("[P2P] SendRaw: send() failed");
+            return;
+        }
+        total += static_cast<std::size_t>(sent);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// StartAsResponder
+// ═════════════════════════════════════════════════════════════════════════════
+
+uint16_t PrivateChatSession::StartAsResponder() {
     if (m_Running.load(std::memory_order_acquire)) {
         spdlog::warn("[P2P] StartAsResponder called while already running");
         return 0;
@@ -433,18 +209,16 @@ uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
         return 0;
     }
 
-    // Query the OS-assigned port.
     sockaddr_in assigned{};
     socklen_t len = sizeof(assigned);
     ::getsockname(listenResult->Get(), reinterpret_cast<sockaddr*>(&assigned), &len);
     const uint16_t port = ntohs(assigned.sin_port);
 
-    // Transfer listen socket ownership to the session.
     m_Socket = std::move(*listenResult);
 
     spdlog::info("[P2P] Responder (TCP) listening on port {}", port);
     AppendMessage("System",
-        std::format("Waiting for {} — TCP port {} (Botan TLS 1.3)...", m_PeerUsername, port),
+        std::format("Waiting for {} — TCP port {}...", m_PeerUsername, port),
         0xFF888888);
 
     m_Running.store(true, std::memory_order_release);
@@ -454,7 +228,7 @@ uint16_t PrivateChatSession::StartAsResponder(P2PKeyType keyType) {
         m_Socket.Reset();
         return 0;
     }
-    if (!m_NetworkExecutor.Post([this, keyType] { ResponderThreadFunc(keyType); })) {
+    if (!m_NetworkExecutor.Post([this] { ResponderThreadFunc(); })) {
         spdlog::error("[P2P] failed to schedule responder loop");
         m_Running.store(false, std::memory_order_release);
         m_Socket.Reset();
@@ -499,6 +273,8 @@ void PrivateChatSession::Close() {
     m_Socket.Reset();
     m_NetworkExecutor.Stop();
     m_Connected.store(false, std::memory_order_release);
+    m_Encrypted.store(false, std::memory_order_release);
+    m_Crypto.reset();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -507,7 +283,7 @@ void PrivateChatSession::Close() {
 
 void PrivateChatSession::Send(std::string_view message) {
     if (!m_Connected.load(std::memory_order_acquire)) {
-        spdlog::warn("[P2P] Send before handshake complete");
+        spdlog::warn("[P2P] Send before connection ready");
         return;
     }
     std::lock_guard lock(m_LogMutex);
@@ -518,7 +294,7 @@ void PrivateChatSession::Send(std::string_view message) {
 // ResponderThreadFunc
 // ═════════════════════════════════════════════════════════════════════════════
 
-void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
+void PrivateChatSession::ResponderThreadFunc() {
     const int listenFd = m_Socket.Get();
     if (listenFd < 0) {
         m_Running.store(false, std::memory_order_release);
@@ -532,15 +308,13 @@ void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
 
     while (m_Running.load(std::memory_order_acquire)) {
         connFd = ::accept(listenFd, reinterpret_cast<sockaddr*>(&peer), &peerLen);
-        if (connFd >= 0)
-            break;
+        if (connFd >= 0) break;
 
         const int err = errno;
         if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-
         if (err != EBADF && err != EINVAL)
             spdlog::error("[P2P] accept() failed (errno={})", err);
         break;
@@ -558,20 +332,16 @@ void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
     ::inet_ntop(AF_INET, &peer.sin_addr, peerIp.data(), peerIp.size());
     spdlog::info("[P2P] TCP accepted from {}:{}", peerIp.data(), ntohs(peer.sin_port));
 
-    try {
-        auto km          = GenerateOrLoadP2PCredentials(m_OwnUsername, keyType);
-        auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
-        auto callbacks   = std::make_shared<P2PCallbacks>(m_Socket.Get(), *this, m_PeerUsername);
-        auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng);
-        auto creds       = std::make_shared<ServerCredentials>(km);
-        auto policy      = std::make_shared<PQPolicy>();
-
-        Botan::TLS::Server channel(callbacks, session_mgr, creds, policy, rng, false);
-        RunLoop(&channel, callbacks.get());
-    } catch (const std::exception& ex) {
-        spdlog::error("[P2P] Responder: {}", ex.what());
-        AppendMessage("System", std::format("Error: {}", ex.what()), 0xFF4444FF);
+    // Try to set up encryption — falls back to plaintext on failure.
+    if (!SetupEncryption(/*isResponder=*/true)) {
+        // Plaintext mode — immediately connected.
+        m_Connected.store(true, std::memory_order_release);
+        AppendMessage("System",
+            "WARNING: This chat is NOT encrypted! Messages are sent in plaintext.",
+            0xFFFF4444);
     }
+
+    RunLoop();
 
     m_Connected.store(false, std::memory_order_release);
     m_Running.store(false, std::memory_order_release);
@@ -579,9 +349,6 @@ void PrivateChatSession::ResponderThreadFunc(P2PKeyType keyType) {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // InitiatorThreadFunc
-//
-// Uses ParsePeerAddress (from_chars, §3.2) and CreateAndConnectSocket
-// (std::expected, RAII).
 // ═════════════════════════════════════════════════════════════════════════════
 
 void PrivateChatSession::InitiatorThreadFunc(std::string peerAddress) {
@@ -593,7 +360,7 @@ void PrivateChatSession::InitiatorThreadFunc(std::string peerAddress) {
     }
 
     AppendMessage("System",
-        std::format("Connecting to {} at {}:{} (Botan TLS 1.3)...",
+        std::format("Connecting to {} at {}:{}...",
                     m_PeerUsername, parsed->Host, parsed->Port),
         0xFF888888);
 
@@ -607,41 +374,43 @@ void PrivateChatSession::InitiatorThreadFunc(std::string peerAddress) {
 
     m_Socket = std::move(*sockResult);
 
-    try {
-        auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
-        auto callbacks   = std::make_shared<P2PCallbacks>(m_Socket.Get(), *this, m_PeerUsername);
-        auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(rng);
-        auto creds       = std::make_shared<ClientCredentials>();
-        auto policy      = std::make_shared<PQPolicy>();
-
-        Botan::TLS::Client channel(callbacks, session_mgr, creds, policy, rng,
-                                   Botan::TLS::Server_Information(parsed->Host, parsed->Port));
-        RunLoop(&channel, callbacks.get());
-    } catch (const std::exception& ex) {
-        spdlog::error("[P2P] Initiator: {}", ex.what());
-        AppendMessage("System", std::format("Error: {}", ex.what()), 0xFF4444FF);
+    // Try to set up encryption — falls back to plaintext on failure.
+    if (!SetupEncryption(/*isResponder=*/false)) {
+        m_Connected.store(true, std::memory_order_release);
+        AppendMessage("System",
+            "WARNING: This chat is NOT encrypted! Messages are sent in plaintext.",
+            0xFFFF4444);
     }
+
+    RunLoop();
 
     m_Connected.store(false, std::memory_order_release);
     m_Running.store(false, std::memory_order_release);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// RunLoop
+// RunLoop — works in both encrypted (via m_Crypto) and plaintext mode
 // ═════════════════════════════════════════════════════════════════════════════
 
-void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel,
-                                 P2PCallbacks* callbacks) {
+void PrivateChatSession::RunLoop() {
     std::array<uint8_t, 16384> recvBuf{};
 
     ::fcntl(m_Socket.Get(), F_SETFL, O_NONBLOCK);
 
-    while (m_Running.load(std::memory_order_acquire) && !channel->is_closed()) {
-
+    while (m_Running.load(std::memory_order_acquire)) {
         const ssize_t len = ::recv(m_Socket.Get(), recvBuf.data(), recvBuf.size(), 0);
+
         if (len > 0) {
-            channel->received_data(
-                std::span<const uint8_t>(recvBuf.data(), static_cast<std::size_t>(len)));
+            auto data = std::span<const uint8_t>(recvBuf.data(), static_cast<std::size_t>(len));
+
+            if (m_Crypto) {
+                // Encrypted: feed raw bytes into TLS engine.
+                m_Crypto->FeedReceivedData(data);
+            } else {
+                // Plaintext: data IS the message.
+                AppendMessage(m_PeerUsername,
+                    std::string(reinterpret_cast<const char*>(data.data()), data.size()));
+            }
         } else if (len == 0) {
             AppendMessage("System",
                 std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
@@ -649,7 +418,7 @@ void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel,
         } else {
             const int err = errno;
             if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
-                // no data this tick
+                // No data this tick.
             } else if (err == ECONNRESET || err == ENOTCONN || err == EPIPE) {
                 AppendMessage("System",
                     std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
@@ -663,29 +432,37 @@ void PrivateChatSession::RunLoop(Botan::TLS::Channel* channel,
             }
         }
 
-        if (!m_Connected.load(std::memory_order_acquire) && callbacks->IsActivated())
+        // Check if crypto handshake completed.
+        if (m_Crypto && !m_Connected.load(std::memory_order_acquire)
+            && m_Crypto->IsActivated()) {
             m_Connected.store(true, std::memory_order_release);
+        }
 
-        // Drain outbound queue under the lock, then send outside it.
+        // Drain outbound queue.
         if (m_Connected.load(std::memory_order_acquire)) {
             std::vector<std::string> pending;
             { std::lock_guard lock(m_LogMutex); pending.swap(m_PendingOutbound); }
-            for (const auto& msg : pending)
-                channel->send(reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
+
+            for (const auto& msg : pending) {
+                if (m_Crypto) {
+                    m_Crypto->Send(msg);
+                } else {
+                    // Plaintext: send directly.
+                    SendRaw(std::span<const uint8_t>(
+                        reinterpret_cast<const uint8_t*>(msg.data()), msg.size()));
+                }
+            }
         }
 
-        if (callbacks->IsCloseNotifyReceived()) break;
+        if (m_Crypto && m_Crypto->IsCloseNotifyReceived()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    // Send close_notify while the socket is still alive.
-    if (m_Socket && !channel->is_closed()) {
-        try { channel->close(); } catch (...) {}
+    // Graceful close.
+    if (m_Crypto && m_Socket) {
+        m_Crypto->Close();
     }
 
-    // Socket closed by RAII or explicitly by the caller (Close / dtor).
-    // We reset it here so the thread doesn't leave a dangling fd for
-    // Close() to double-close.
     m_Socket.Reset();
     m_Connected.store(false, std::memory_order_release);
 }
@@ -709,11 +486,10 @@ std::vector<ChatEntry>* PrivateChatSession::RefreshAndGetChatEntries(const std::
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// OnUIRender
+// BuildChatEntries / OnUIRender
 // ═════════════════════════════════════════════════════════════════════════════
 
 std::vector<ChatEntry> PrivateChatSession::BuildChatEntries(const std::string& ownUsername) const {
-    // Must be called under m_LogMutex.
     std::vector<ChatEntry> entries;
     entries.reserve(m_Log.size());
 
@@ -749,7 +525,6 @@ bool PrivateChatSession::OnUIRender(const std::string& ownUsername, uint32_t /*o
         return m_WindowOpen;
     }
 
-    // Snapshot the log into ChatEntry format under the lock.
     {
         std::lock_guard lock(m_LogMutex);
         m_CachedEntries = BuildChatEntries(ownUsername);
@@ -758,12 +533,10 @@ bool PrivateChatSession::OnUIRender(const std::string& ownUsername, uint32_t /*o
     const bool connected   = m_Connected.load(std::memory_order_acquire);
     const bool handshaking = m_Running.load(std::memory_order_acquire) && !connected;
 
-    // Render status bar + message bubbles + input bar.
     m_ChatPanel.RenderChatArea(
         m_CachedEntries, ownUsername, m_PeerUsername,
         connected, handshaking);
 
-    // If the user submitted a message via the input bar, send it.
     if (auto msg = m_ChatPanel.ConsumePendingMessage()) {
         Send(*msg);
         AppendMessage(ownUsername, *msg, 0xFFFFFFFF);

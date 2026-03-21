@@ -1,4 +1,5 @@
 #include "DtlsServer.h"
+#include "WolfSSLCrypto.h"
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Server.cpp — implementation
@@ -35,9 +36,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <wolfssl/wolfcrypt/rsa.h>
-#include <wolfssl/wolfcrypt/asn_public.h>
-#include <wolfssl/wolfcrypt/random.h>
 
 #include <spdlog/spdlog.h>
 
@@ -259,8 +257,7 @@ std::expected<WolfContext, ServerError> Server::CreateTLSContext() const {
     if (!ctx)
         return std::unexpected(ServerError::ContextInit);
 
-    int groups[] = { WOLFSSL_ML_KEM_512 };
-    wolfSSL_CTX_set_groups(ctx.get(), groups, 1);
+    WolfSSLCrypto::ConfigureKeyExchange(ctx.get());
 
     wolfSSL_CTX_SetIORecv(ctx.get(), IORecv);
     wolfSSL_CTX_SetIOSend(ctx.get(), IOSend);
@@ -318,55 +315,13 @@ std::expected<InitResources, ServerError> Server::InitNetwork() const {
 }
 
 std::expected<GeneratedCredentials, ServerError> Server::GenerateSelfSignedCert() const {
-    WC_RNG rng;
-    if (wc_InitRng(&rng) != 0)
+    auto result = WolfSSLCrypto::GenerateSelfSignedCert();
+    if (!result)
         return std::unexpected(ServerError::CertificateGeneration);
 
-    RsaKey key;
-    if (wc_InitRsaKey(&key, nullptr) != 0) {
-        wc_FreeRng(&rng);
-        return std::unexpected(ServerError::CertificateGeneration);
-    }
-
-    if (wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0) {
-        wc_FreeRsaKey(&key);
-        wc_FreeRng(&rng);
-        return std::unexpected(ServerError::CertificateGeneration);
-    }
-
-    std::vector<uint8_t> keyDer(4096);
-    int keySz = wc_RsaKeyToDer(&key, keyDer.data(),
-                                static_cast<word32>(keyDer.size()));
-    if (keySz < 0) {
-        wc_FreeRsaKey(&key);
-        wc_FreeRng(&rng);
-        return std::unexpected(ServerError::CertificateGeneration);
-    }
-    keyDer.resize(static_cast<size_t>(keySz));
-
-    Cert cert;
-    wc_InitCert(&cert);
-    std::strncpy(cert.subject.commonName, "Safira DTLS Server", CTC_NAME_SIZE);
-    cert.isCA    = 0;
-    cert.sigType = CTC_SHA256wRSA;
-    cert.daysValid = 365;
-
-    std::vector<uint8_t> certDer(4096);
-    int certSz = wc_MakeSelfCert(&cert, certDer.data(),
-                                  static_cast<word32>(certDer.size()),
-                                  &key, &rng);
-
-    wc_FreeRsaKey(&key);
-    wc_FreeRng(&rng);
-
-    if (certSz < 0)
-        return std::unexpected(ServerError::CertificateGeneration);
-
-    certDer.resize(static_cast<size_t>(certSz));
-
-    return GeneratedCredentials {
-        .CertDer = std::move(certDer),
-        .KeyDer  = std::move(keyDer),
+    return GeneratedCredentials{
+        .CertDer = std::move(result->CertDer),
+        .KeyDer  = std::move(result->KeyDer),
     };
 }
 

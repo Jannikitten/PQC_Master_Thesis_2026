@@ -1,11 +1,15 @@
 #ifndef PQC_MASTER_THESIS_2026_PRIVATECHATSESSION_H
 #define PQC_MASTER_THESIS_2026_PRIVATECHATSESSION_H
 
-// PrivateChatSession.h -- peer-to-peer TLS 1.3 chat via Botan
-//                         (X25519/ML-KEM-768 key exchange)
+// ═════════════════════════════════════════════════════════════════════════════
+// PrivateChatSession.h — peer-to-peer chat over TCP
+//
+// Encryption is optional: when BotanP2PCrypto is available the connection
+// is wrapped in TLS 1.3 (X25519/ML-KEM-768).  Without it, messages are
+// sent as plaintext TCP and a warning is shown to the user.
+// ═════════════════════════════════════════════════════════════════════════════
 
 #include <algorithm>
-#include "P2PCredentials.h"
 #include "ChatView.h"
 #include "NetworkExecutor.h"
 
@@ -13,16 +17,19 @@
 #include <atomic>
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <netinet/in.h>
 
-namespace Botan::TLS { class Channel; }
-
 namespace Safira {
+
+// Forward-declare — no Botan headers pulled in.
+class BotanP2PCrypto;
 
 class UniqueSocket {
 public:
@@ -70,8 +77,6 @@ enum class P2PError : uint8_t {
     return "unknown error";
 }
 
-class P2PCallbacks;
-
 class PrivateChatSession {
 public:
     PrivateChatSession(std::string ownUsername, std::string peerUsername);
@@ -80,14 +85,15 @@ public:
     PrivateChatSession(const PrivateChatSession&)            = delete;
     PrivateChatSession& operator=(const PrivateChatSession&) = delete;
 
-    uint16_t StartAsResponder(P2PKeyType keyType = P2PKeyType::RSA_PSS);
+    uint16_t StartAsResponder();
     void     StartAsInitiator(std::string_view peerAddress);
 
     void Close();
 
     [[nodiscard]] bool IsConnected() const noexcept { return m_Connected.load(std::memory_order_acquire); }
-    [[nodiscard]] bool IsRunning() const noexcept { return m_Running.load(std::memory_order_acquire); }
+    [[nodiscard]] bool IsRunning()   const noexcept { return m_Running.load(std::memory_order_acquire); }
     [[nodiscard]] bool IsClosed()    const noexcept { return !m_Running.load(std::memory_order_acquire); }
+    [[nodiscard]] bool IsEncrypted() const noexcept { return m_Encrypted.load(std::memory_order_acquire); }
     [[nodiscard]] const std::string& GetPeerUsername() const noexcept { return m_PeerUsername; }
 
     void Send(std::string_view message);
@@ -96,9 +102,6 @@ public:
     void AppendMessage(const std::string& who, const std::string& text,
                        uint32_t color = 0xFFFFFFFF);
 
-    /// Thread-safe: locks m_LogMutex, rebuilds cached entries, returns pointer.
-    /// The returned pointer is stable until the next call to this method.
-    /// Used by ClientLayer::RebuildConversationList().
     std::vector<ChatEntry>* RefreshAndGetChatEntries(const std::string& ownUsername);
 
 private:
@@ -108,9 +111,16 @@ private:
     [[nodiscard]] static std::expected<UniqueSocket, P2PError>
         CreateAndConnectSocket(std::string_view ip, uint16_t port);
 
-    void ResponderThreadFunc(P2PKeyType keyType);
+    void ResponderThreadFunc();
     void InitiatorThreadFunc(std::string peerAddress);
-    void RunLoop(Botan::TLS::Channel* channel, P2PCallbacks* callbacks);
+    void RunLoop();
+
+    /// Try to set up BotanP2PCrypto for encrypted communication.
+    /// Returns true if encryption was successfully initialised.
+    bool SetupEncryption(bool isResponder);
+
+    /// Send raw bytes over the TCP socket.
+    void SendRaw(std::span<const uint8_t> data);
 
     std::string   m_PeerUsername;
     std::string   m_OwnUsername;
@@ -118,7 +128,10 @@ private:
 
     std::atomic<bool> m_Running   { false };
     std::atomic<bool> m_Connected { false };
+    std::atomic<bool> m_Encrypted { false };
     NetworkExecutor   m_NetworkExecutor;
+
+    std::unique_ptr<BotanP2PCrypto> m_Crypto;
 
     std::vector<std::string> m_PendingOutbound;   // guarded by m_LogMutex
 

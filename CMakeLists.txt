@@ -105,6 +105,10 @@ add_library(CoreLib STATIC
         Core/common/Input.cpp
         Core/common/StringUtils.cpp
 
+        # ── infrastructure/crypto ─────────────────────────────────────────
+        Core/infrastructure/crypto/WolfSSLCrypto.cpp
+        Core/infrastructure/crypto/BotanP2PCrypto.cpp
+
         # ── infrastructure/network ───────────────────────────────────────
         Core/infrastructure/network/NetworkExecutor.cpp
         Core/infrastructure/network/DtlsClient.cpp

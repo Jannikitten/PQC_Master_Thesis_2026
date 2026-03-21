@@ -3,6 +3,8 @@
 #include "PacketSerialize.h"
 #include "GuiApp.h"
 #include "Theme.h"
+#include "WolfSSLCrypto.h"
+#include "BotanP2PCrypto.h"
 
 using Safira::Theme;
 
@@ -90,8 +92,7 @@ void ClientLayer::WireEffectHandler(
         const auto& state = m_Store->GetState();
         auto session = std::make_unique<Safira::PrivateChatSession>(
             state.Username, peerUsername);
-        const uint16_t port = session->StartAsResponder(
-            Safira::P2PKeyType::RSA_PSS);
+        const uint16_t port = session->StartAsResponder();
         if (port == 0) {
             m_Console.AddItalicMessage(
                 "Failed to start P2P listener for {}", peerUsername);
@@ -629,7 +630,7 @@ void ClientLayer::RenderChatWindow() {
 
         if (m_ActiveConvoIdx == 0) {
             input.IsConnected = IsConnected();
-            input.StatusProtocol = "DTLS 1.3 | ML-KEM-512";
+            input.StatusProtocol = Safira::WolfSSLCrypto::ProtocolDescription();
         } else {
             int sessionIdx = 0;
             for (auto& [peer, session] : m_PrivateChats) {
@@ -637,12 +638,14 @@ void ClientLayer::RenderChatWindow() {
                     input.IsConnected   = session->IsConnected();
                     input.IsHandshaking = session->IsRunning()
                                           && !input.IsConnected;
+                    input.StatusProtocol = session->IsEncrypted()
+                        ? Safira::BotanP2PCrypto::ProtocolDescription()
+                        : "TCP | No encryption";
                     peerName = peer;
                     break;
                 }
                 sessionIdx++;
             }
-            input.StatusProtocol = "TLS 1.3 | X25519/ML-KEM-768";
             input.PeerName = peerName;
             input.OwnAvatar  = m_AvatarManager.OwnTexture();
             input.PeerAvatar = m_AvatarManager.PeerTexture(peerName);

@@ -1,4 +1,5 @@
 #include "DtlsClient.h"
+#include "WolfSSLCrypto.h"
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Client.cpp
@@ -235,9 +236,7 @@ Client::CreateTLSContext() const {
     if (!ctx)
         return std::unexpected(ClientError::ContextInit);
 
-    // PQC — ML-KEM-512 key exchange (Change this before task begins).
-    int groups[] = { WOLFSSL_ML_KEM_512 };
-    wolfSSL_CTX_set_groups(ctx.get(), groups, 1);
+    WolfSSLCrypto::ConfigureKeyExchange(ctx.get());
 
     wolfSSL_CTX_SetIOSend(ctx.get(), IOSend);
     wolfSSL_CTX_SetIORecv(ctx.get(), IORecv);
