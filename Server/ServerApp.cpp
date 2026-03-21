@@ -5,7 +5,7 @@ bool g_ApplicationRunning = true;
 
 Safira::ApplicationConsole* Safira::CreateApplication(int argc, char** argv) {
     ApplicationSpecification spec;
-    spec.name = "Walnut Chat Server 1.0";
+    spec.name = "Safira Chat Server 1.0";
 
     ApplicationConsole* app = new ApplicationConsole(spec);
     app->PushLayer<ServerLayer>();
