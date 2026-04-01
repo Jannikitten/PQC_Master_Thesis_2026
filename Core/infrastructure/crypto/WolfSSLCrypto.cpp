@@ -1,3 +1,17 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── Programming Task 1: Make Key Exchange Connection Quantum-Secure ────────────
+//
+// SCENARIO
+// ────────
+// The DTLS connection currently uses a CLASSICAL key-exchange scheme.
+// Your task is to modify the code in this class so that the DTLS 
+// handshake is protected against adversaries with quantum capabilities.
+//
+//
+// Note: it is not possible to connect to the server until the key exchange is 
+// quantum-safe
+// ═══════════════════════════════════════════════════════════════════════════════
+
 #include "WolfSSLCrypto.h"
 
 #include <cstring>
@@ -11,22 +25,8 @@
 
 namespace Safira {
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ConfigureKeyExchange
-//
-// Programming Task 1
-// ------------------
-// The DTLS connection currently uses a CLASSICAL key-exchange algorithm.
-// Your task: change the group below to WOLFSSL_ML_KEM_512 so that the
-// handshake is protected against quantum computers.
-//
-// Hint: look at the wolfSSL documentation for wolfSSL_CTX_set_groups()
-// and the WOLFSSL_ML_KEM_512 constant.
-// ═════════════════════════════════════════════════════════════════════════════
-
 void WolfSSLCrypto::ConfigureKeyExchange(WOLFSSL_CTX* ctx) {
-    // TODO (Task 1): Replace this with the ML-KEM-512 post-quantum group.
-    int groups[] = { WOLFSSL_ML_KEM_512 };
+    int groups[] = { WOLFSSL_ECC_X25519 };
     wolfSSL_CTX_set_groups(ctx, groups, 1);
 }
 
@@ -35,7 +35,7 @@ void WolfSSLCrypto::ConfigureKeyExchange(WOLFSSL_CTX* ctx) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 std::string WolfSSLCrypto::ProtocolDescription() {
-    return "DTLS 1.3 | ML-KEM-512";
+    return "DTLS 1.3 | ECC-X25519";
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

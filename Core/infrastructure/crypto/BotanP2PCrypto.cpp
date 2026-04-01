@@ -1,16 +1,30 @@
-#include "BotanP2PCrypto.h"
-
-// ═════════════════════════════════════════════════════════════════════════════
-// BotanP2PCrypto.cpp — all Botan TLS 1.3 code for P2P chat encryption
+// ═══════════════════════════════════════════════════════════════════════════════
+// BotanP2PCrypto.cpp — Botan 3 TLS 1.3 encryption for P2P chat sessions
 //
-// This file contains:
-//   • PQ TLS 1.3 policy (X25519/ML-KEM-768 hybrid key exchange)
-//   • ServerCredentials / ClientCredentials (Botan Credentials_Manager)
-//   • P2P credential generation and persistence (RSA-PSS / ML-DSA-65)
-//   • TLS callbacks adapter
-//   • Peer certificate fingerprint verification (TOFU)
-//   • The pimpl Impl struct that owns the TLS channel
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Programming Task 2: Quantum-Secure P2P Encryption ───────────────────────
+//
+// SCENARIO
+// ────────
+// You are building the encryption layer for a peer-to-peer chat application.
+// Your organisation's threat model includes "harvest now, decrypt later"
+// (P79 §7.1, Slide 227): an adversary records encrypted traffic today and
+// waits for a quantum computer to break classical key exchange.
+//
+// Implement TLS 1.3 encryption using the Botan 3 library, ensuring that both
+// key exchange and authentication are resistant to quantum adversaries.
+//
+// The application scaffolding is provided.  You fill in the Botan-specific
+// code in the clearly marked TODO sections.
+//
+// WHAT YOU NEED TO DO
+// ───────────────────
+//   TODO(1) — TLS policy: key exchange groups + allowed signature schemes
+//   TODO(2) — Generate an identity keypair + self-signed X.509 certificate
+//   TODO(3) — ServerCredentials: supply cert and key to the TLS engine
+//   TODO(4) — TLS callbacks: wire Botan events to application callbacks
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#include "BotanP2PCrypto.h"
 
 #include <algorithm>
 #include <cctype>
@@ -20,7 +34,6 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
-#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -50,266 +63,179 @@
 #include <spdlog/spdlog.h>
 
 namespace Safira {
-
-// ═════════════════════════════════════════════════════════════════════════════
-// ConfigureKeyExchange
-//
-// Programming Task 2
-// ------------------
-// TBA
-//
-// Hint: TBA
-// ═════════════════════════════════════════════════════════════════════════════
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Filesystem helpers
-// ═════════════════════════════════════════════════════════════════════════════
-
 namespace {
 
-[[nodiscard]] std::filesystem::path GetSafiraDataDir() {
-    const char* home = std::getenv("HOME");
-    const std::filesystem::path base = (home && *home)
-        ? std::filesystem::path(home) / ".safira"
-        : std::filesystem::path(".safira");
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PROVIDED — do not modify anything above the "YOUR CODE" marker
+// ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Filesystem helpers ───────────────────────────────────────────────────────
+
+void HardenPermissions(const std::filesystem::path& p) {
+    ::chmod(p.string().c_str(), S_IRUSR | S_IWUSR);
+}
+
+[[nodiscard]] std::filesystem::path DataDir() {
+    const char* home = std::getenv("HOME");
+    std::filesystem::path base =
+        (home && *home) ? std::filesystem::path(home) / ".safira"
+                        : std::filesystem::path(".safira");
     std::error_code ec;
     std::filesystem::create_directories(base, ec);
     ::chmod(base.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
     return base;
 }
 
-void HardenFilePermissions(const std::filesystem::path& path) {
-    ::chmod(path.string().c_str(), S_IRUSR | S_IWUSR);
-}
-
-[[nodiscard]] std::string SanitizeIdentityName(std::string_view raw) {
+[[nodiscard]] std::string SanitizeName(std::string_view raw) {
     std::string out;
     out.reserve(raw.size());
-    for (const char c : raw) {
+    for (char c : raw) {
         if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.')
             out.push_back(c);
         else
             out.push_back('_');
     }
-    if (out.empty())
-        out = "default";
-    return out;
+    return out.empty() ? std::string("default") : out;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Credential types & generation
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Credential types ─────────────────────────────────────────────────────────
 
-enum class P2PKeyType {
-    RSA_PSS,     // Classical — works now
-    ML_DSA_65,   // Full post-quantum (Botan 3.6+)
-};
-
-struct P2PKeyMaterial {
+struct KeyMaterial {
     std::shared_ptr<Botan::Private_Key>      Key;
     std::shared_ptr<Botan::X509_Certificate> Cert;
 };
 
-[[nodiscard]] P2PKeyMaterial GenerateP2PCredentials(
-    P2PKeyType type = P2PKeyType::RSA_PSS,
-    const std::string& cn = "safira-p2p")
-{
-    auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
+// ── TOFU fingerprint store ───────────────────────────────────────────────────
 
-    std::shared_ptr<Botan::Private_Key> key;
-    std::string sig_padding;
+enum class PinStatus : uint8_t { Match, FirstUse, Mismatch };
 
-    switch (type) {
-        case P2PKeyType::RSA_PSS:
-            key = std::make_shared<Botan::RSA_PrivateKey>(*rng, 2048);
-            sig_padding = "SHA-256";
-            break;
-
-        case P2PKeyType::ML_DSA_65:
-            key = Botan::create_private_key("ML-DSA", *rng, "ML-DSA-65");
-            sig_padding = "";
-            break;
-    }
-
-    Botan::X509_Cert_Options opts(cn, 3650 * 24 * 60 * 60);
-
-    auto cert = std::make_shared<Botan::X509_Certificate>(
-        Botan::X509::create_self_signed_cert(opts, *key, sig_padding, *rng));
-
-    return { key, cert };
-}
-
-[[nodiscard]] P2PKeyMaterial GenerateOrLoadP2PCredentials(
-    std::string_view identityName,
-    P2PKeyType type = P2PKeyType::RSA_PSS) {
-    const auto safeName = SanitizeIdentityName(identityName);
-    const std::filesystem::path dir = GetSafiraDataDir() / "p2p_identities";
-    const std::filesystem::path keyPath = dir / (safeName + ".key.pem");
-    const std::filesystem::path certPath = dir / (safeName + ".cert.pem");
-
-    std::filesystem::create_directories(dir);
-    ::chmod(dir.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
-
-    if (std::filesystem::exists(keyPath) && std::filesystem::exists(certPath)) {
-        try {
-            Botan::DataSource_Stream keySrc(keyPath.string(), true);
-            auto keyUnique = Botan::PKCS8::load_key(keySrc);
-            auto cert = std::make_shared<Botan::X509_Certificate>(certPath.string());
-            if (keyUnique && cert) {
-                auto key = std::shared_ptr<Botan::Private_Key>(std::move(keyUnique));
-                return { key, cert };
-            }
-        } catch (...) {
-            // Fall through to regeneration below.
-        }
-    }
-
-    auto material = GenerateP2PCredentials(type, safeName);
-
-    {
-        std::ofstream keyOut(keyPath, std::ios::trunc);
-        keyOut << Botan::PKCS8::PEM_encode(*material.Key);
-        keyOut.flush();
-    }
-    HardenFilePermissions(keyPath);
-
-    {
-        std::ofstream certOut(certPath, std::ios::trunc);
-        certOut << material.Cert->PEM_encode();
-        certOut.flush();
-    }
-    HardenFilePermissions(certPath);
-
-    return material;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Peer certificate fingerprint verification (TOFU)
-// ═════════════════════════════════════════════════════════════════════════════
-
-enum class PinVerificationStatus : uint8_t {
-    Match,
-    TrustedFirstUse,
-    Mismatch,
-};
-
-struct PinVerificationResult {
-    PinVerificationStatus Status = PinVerificationStatus::Mismatch;
+struct PinResult {
+    PinStatus   Status;
     std::string Fingerprint;
 };
 
-[[nodiscard]] std::filesystem::path GetPeerPinStorePath() {
-    return GetSafiraDataDir() / "KnownPeerFingerprints.txt";
-}
-
 [[nodiscard]] std::unordered_map<std::string, std::string> LoadPeerPins() {
     std::unordered_map<std::string, std::string> pins;
-    std::ifstream in(GetPeerPinStorePath());
-    if (!in) return pins;
-
+    std::ifstream in(DataDir() / "KnownPeerFingerprints.txt");
     std::string line;
     while (std::getline(in, line)) {
-        if (line.empty()) continue;
         std::istringstream iss(line);
         std::string user, fp;
-        if (!(iss >> user >> fp)) continue;
-        pins[user] = fp;
+        if (iss >> user >> fp)
+            pins[user] = fp;
     }
     return pins;
 }
 
 void SavePeerPins(const std::unordered_map<std::string, std::string>& pins) {
-    const auto path = GetPeerPinStorePath();
+    auto path = DataDir() / "KnownPeerFingerprints.txt";
     std::ofstream out(path, std::ios::trunc);
     for (const auto& [user, fp] : pins)
         out << user << ' ' << fp << '\n';
     out.flush();
-    HardenFilePermissions(path);
+    HardenPermissions(path);
 }
 
-[[nodiscard]] PinVerificationResult VerifyOrTrustPeerFingerprint(
-    const std::string& peerUsername,
-    const std::string& fingerprint)
+[[nodiscard]] PinResult VerifyOrTrustPeerFingerprint(
+    const std::string& peerUsername, const std::string& fingerprint)
 {
-    static std::mutex s_PinMutex;
-    std::lock_guard lock(s_PinMutex);
+    static std::mutex mu;
+    std::lock_guard lock(mu);
 
     auto pins = LoadPeerPins();
-    if (const auto it = pins.find(peerUsername); it != pins.end()) {
+    if (auto it = pins.find(peerUsername); it != pins.end()) {
         return {
-            .Status = (it->second == fingerprint)
-                ? PinVerificationStatus::Match
-                : PinVerificationStatus::Mismatch,
+            .Status      = (it->second == fingerprint) ? PinStatus::Match
+                                                       : PinStatus::Mismatch,
             .Fingerprint = it->second,
         };
     }
-
     pins[peerUsername] = fingerprint;
     SavePeerPins(pins);
-    return { .Status = PinVerificationStatus::TrustedFirstUse, .Fingerprint = fingerprint };
+    return { .Status = PinStatus::FirstUse, .Fingerprint = fingerprint };
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// PQ TLS 1.3 Policy
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO(1) — TLS 1.3 Policy
+//
+// Fill in the method bodies of this policy class.
+// ─────────────────────────────────────────────────────────────────────────────
 
 class PQPolicy : public Botan::TLS::Default_Policy {
 public:
+
     [[nodiscard]] Botan::TLS::Protocol_Version min_version() const {
-        return Botan::TLS::Protocol_Version::TLS_V13;
+        // ── YOUR CODE HERE ──
+        return {};
     }
 
     [[nodiscard]] std::vector<Botan::TLS::Group_Params>
     key_exchange_groups() const override {
-        return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
+        // ── YOUR CODE HERE ──
+        return {};
     }
 
     [[nodiscard]] std::vector<Botan::TLS::Group_Params>
     key_exchange_groups_to_offer() const override {
-        return { Botan::TLS::Group_Params::HYBRID_X25519_ML_KEM_768 };
+        // ── YOUR CODE HERE ──
+        return {};
     }
 
-    [[nodiscard]] bool require_cert_revocation_info() const override { return false; }
+    // Return false — we use TOFU, not a CA with revocation lists.
+    [[nodiscard]] bool require_cert_revocation_info() const override {
+        return false;
+    }
 
     [[nodiscard]] std::vector<Botan::TLS::Signature_Scheme>
     allowed_signature_schemes() const override {
-        return {
-            Botan::TLS::Signature_Scheme::RSA_PSS_SHA256,
-            Botan::TLS::Signature_Scheme::RSA_PSS_SHA384,
-            Botan::TLS::Signature_Scheme::RSA_PSS_SHA512,
-            Botan::TLS::Signature_Scheme::ECDSA_SHA256,
-            Botan::TLS::Signature_Scheme::ECDSA_SHA384,
-            Botan::TLS::Signature_Scheme::ECDSA_SHA512,
-            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA256,
-            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA384,
-            Botan::TLS::Signature_Scheme::RSA_PKCS1_SHA512,
-        };
+        // ── YOUR CODE HERE ──
+        return {};
     }
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ServerCredentials / ClientCredentials
-// ═════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO(2) — Generate an identity keypair + self-signed X.509 certificate
+// ─────────────────────────────────────────────────────────────────────────────
+
+[[nodiscard]] KeyMaterial GenerateOrLoadCredentials(
+    std::string_view identityName,
+    Botan::RandomNumberGenerator& rng)
+{
+    const auto safeName = SanitizeName(identityName);
+    const auto dir      = DataDir() / "p2p_identities";
+    const auto keyPath  = dir / (safeName + ".key.pem");
+    const auto certPath = dir / (safeName + ".cert.pem");
+
+    std::filesystem::create_directories(dir);
+    ::chmod(dir.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+
+    // ── YOUR CODE HERE ──
+    // Try loading existing credentials from keyPath / certPath.
+    // If that fails, generate fresh ones, persist them, and return.
+
+    throw std::runtime_error("GenerateOrLoadCredentials not implemented");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO(3) — ServerCredentials
+//
+// Fill in the two method bodies.  The private members are already declared.
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ServerCredentials : public Botan::Credentials_Manager {
 public:
-    explicit ServerCredentials(const P2PKeyMaterial& km)
+    explicit ServerCredentials(const KeyMaterial& km)
         : m_Key(km.Key), m_Cert(km.Cert) {}
 
     std::vector<Botan::X509_Certificate> find_cert_chain(
-        const std::vector<std::string>& cert_key_types,
+        const std::vector<std::string>& key_types,
         const std::vector<Botan::AlgorithmIdentifier>&,
         const std::vector<Botan::X509_DN>&,
         const std::string& type,
         const std::string&) override
     {
-        if (type == "tls-server") {
-            const std::string our_key_type = m_Key->algo_name();
-            if (cert_key_types.empty()
-                || std::ranges::find(cert_key_types, our_key_type) != cert_key_types.end())
-                return { *m_Cert };
-        }
+        // ── YOUR CODE HERE ──
         return {};
     }
 
@@ -318,7 +244,8 @@ public:
         const std::string&,
         const std::string&) override
     {
-        return m_Key;
+        // ── YOUR CODE HERE ──
+        return nullptr;
     }
 
 private:
@@ -328,16 +255,18 @@ private:
 
 class ClientCredentials : public Botan::Credentials_Manager {
 public:
+    // No trusted CAs — verification is done by TOFU in tls_verify_cert_chain.
     std::vector<Botan::Certificate_Store*> trusted_certificate_authorities(
-        const std::string&, const std::string&) override
-    {
-        return {};
-    }
+        const std::string&, const std::string&) override { return {}; }
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// TLS Callbacks adapter
-// ═════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO(4) — TLS Callbacks
+//
+// Fill in the six method bodies.  Private members and the constructor are
+// already provided.
+// ─────────────────────────────────────────────────────────────────────────────
 
 class TLSCallbacksAdapter : public Botan::TLS::Callbacks {
 public:
@@ -346,77 +275,35 @@ public:
         , m_PeerUsername(std::move(peerUsername)) {}
 
     void tls_emit_data(std::span<const uint8_t> data) override {
-        if (m_Cbs.EmitData)
-            m_Cbs.EmitData(data);
+        // ── YOUR CODE HERE ──
     }
 
     void tls_record_received(uint64_t /*seq_no*/,
                              std::span<const uint8_t> data) override {
-        if (m_Cbs.MessageReceived)
-            m_Cbs.MessageReceived(
-                m_PeerUsername,
-                std::string(reinterpret_cast<const char*>(data.data()), data.size()),
-                0xFFFFFFFF);
+        // ── YOUR CODE HERE ──
     }
 
     void tls_alert(Botan::TLS::Alert alert) override {
-        if (alert.type() == Botan::TLS::Alert::CloseNotify) {
-            if (m_Cbs.Closed)
-                m_Cbs.Closed(std::format("{} closed the connection.", m_PeerUsername));
-            m_CloseNotifyReceived = true;
-        } else {
-            spdlog::warn("[P2P-Crypto] TLS alert: {}", alert.type_string());
-        }
+        // ── YOUR CODE HERE ──
     }
 
     void tls_session_activated() override {
-        spdlog::info("[P2P-Crypto] TLS 1.3 + X25519/ML-KEM-768 handshake complete with {}",
-                     m_PeerUsername);
-        if (m_Cbs.Activated)
-            m_Cbs.Activated();
-        if (m_FirstUseTrusted && m_Cbs.MessageReceived) {
-            m_Cbs.MessageReceived("System",
-                std::format("First trusted fingerprint for {}: {}", m_PeerUsername, m_FirstUseFingerprint),
-                0xFFCCAA66);
-        }
-        m_Activated = true;
+        // ── YOUR CODE HERE ──
     }
 
     void tls_verify_cert_chain(
-        const std::vector<Botan::X509_Certificate>& cert_chain,
+        const std::vector<Botan::X509_Certificate>& chain,
         const std::vector<std::optional<Botan::OCSP::Response>>&,
         const std::vector<Botan::Certificate_Store*>&,
         Botan::Usage_Type,
         std::string_view,
         const Botan::TLS::Policy&) override
     {
-        if (cert_chain.empty()) {
-            spdlog::info("[P2P-Crypto] Peer {} presented no client certificate — skipping verification",
-                         m_PeerUsername);
-            return;
-        }
-
-        const std::string expectedCN = SanitizeIdentityName(m_PeerUsername);
-        const std::string certCN = cert_chain.front().subject_dn().get_first_attribute("X520.CommonName");
-        if (certCN.empty())
-            throw std::runtime_error("peer certificate missing common name");
-        if (certCN != expectedCN)
-            throw std::runtime_error(
-                std::format("peer identity mismatch (expected '{}', got '{}')", expectedCN, certCN));
-
-        const std::string fp = cert_chain.front().fingerprint("SHA-256");
-        const auto pinResult = VerifyOrTrustPeerFingerprint(m_PeerUsername, fp);
-        if (pinResult.Status == PinVerificationStatus::Mismatch)
-            throw std::runtime_error("peer certificate fingerprint mismatch");
-        if (pinResult.Status == PinVerificationStatus::TrustedFirstUse) {
-            m_FirstUseTrusted     = true;
-            m_FirstUseFingerprint = fp;
-            spdlog::warn("[P2P-Crypto] First-use trust for {} fingerprint {}", m_PeerUsername, fp);
-        }
+        // ── YOUR CODE HERE ──
     }
 
-    [[nodiscard]] bool IsActivated()           const noexcept { return m_Activated; }
-    [[nodiscard]] bool IsCloseNotifyReceived() const noexcept { return m_CloseNotifyReceived; }
+    [[nodiscard]] bool IsActivated()           const { return m_Activated; }
+    [[nodiscard]] bool IsCloseNotifyReceived() const { return m_CloseNotifyReceived; }
 
 private:
     BotanP2PCrypto::Callbacks m_Cbs;
@@ -429,9 +316,10 @@ private:
 
 } // anonymous namespace
 
-// ═════════════════════════════════════════════════════════════════════════════
-// BotanP2PCrypto::Impl — pimpl holding all Botan objects
-// ═════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pimpl struct  (provided)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 struct BotanP2PCrypto::Impl {
     std::shared_ptr<TLSCallbacksAdapter>                    CallbacksAdapter;
@@ -442,49 +330,50 @@ struct BotanP2PCrypto::Impl {
     std::unique_ptr<Botan::TLS::Channel>                    Channel;
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// BotanP2PCrypto public API
-// ═════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Public API
+// ═══════════════════════════════════════════════════════════════════════════════
 
 BotanP2PCrypto::BotanP2PCrypto()  = default;
 BotanP2PCrypto::~BotanP2PCrypto() = default;
 
 void BotanP2PCrypto::Start(const Config& config, Callbacks callbacks) {
-    m_Impl = std::make_unique<Impl>();
-
-    m_Impl->Rng        = std::make_shared<Botan::AutoSeeded_RNG>();
-    m_Impl->SessionMgr = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(m_Impl->Rng);
-    m_Impl->Policy     = std::make_shared<PQPolicy>();
-    m_Impl->CallbacksAdapter = std::make_shared<TLSCallbacksAdapter>(
-        std::move(callbacks), config.PeerUsername);
-
+    auto impl = std::make_unique<Impl>();
+ 
+    impl->Rng              = std::make_shared<Botan::AutoSeeded_RNG>();
+    impl->SessionMgr       = std::make_shared<Botan::TLS::Session_Manager_In_Memory>(impl->Rng);
+    impl->Policy           = std::make_shared<PQPolicy>();
+    impl->CallbacksAdapter = std::make_shared<TLSCallbacksAdapter>(std::move(callbacks), config.PeerUsername);
+ 
     if (config.IsResponder) {
-        auto km = GenerateOrLoadP2PCredentials(config.OwnUsername, P2PKeyType::RSA_PSS);
-        m_Impl->Creds = std::make_shared<ServerCredentials>(km);
-
-        m_Impl->Channel = std::make_unique<Botan::TLS::Server>(
-            m_Impl->CallbacksAdapter,
-            m_Impl->SessionMgr,
-            m_Impl->Creds,
-            m_Impl->Policy,
-            m_Impl->Rng,
+        auto km = GenerateOrLoadCredentials(config.OwnUsername, *impl->Rng);
+        impl->Creds = std::make_shared<ServerCredentials>(km);
+ 
+        impl->Channel = std::make_unique<Botan::TLS::Server>(
+            impl->CallbacksAdapter,
+            impl->SessionMgr,
+            impl->Creds,
+            impl->Policy,
+            impl->Rng,
             false);
     } else {
-        m_Impl->Creds = std::make_shared<ClientCredentials>();
-
-        m_Impl->Channel = std::make_unique<Botan::TLS::Client>(
-            m_Impl->CallbacksAdapter,
-            m_Impl->SessionMgr,
-            m_Impl->Creds,
-            m_Impl->Policy,
-            m_Impl->Rng,
+        impl->Creds = std::make_shared<ClientCredentials>();
+ 
+        impl->Channel = std::make_unique<Botan::TLS::Client>(
+            impl->CallbacksAdapter,
+            impl->SessionMgr,
+            impl->Creds,
+            impl->Policy,
+            impl->Rng,
             Botan::TLS::Server_Information("localhost", 0));
     }
+ 
+    m_Impl = std::move(impl);
 }
 
 void BotanP2PCrypto::FeedReceivedData(std::span<const uint8_t> data) {
-    if (m_Impl && m_Impl->Channel)
-        m_Impl->Channel->received_data(data);
+    m_Impl->Channel->received_data(data);
 }
 
 void BotanP2PCrypto::Send(std::string_view message) {
@@ -494,9 +383,12 @@ void BotanP2PCrypto::Send(std::string_view message) {
 }
 
 void BotanP2PCrypto::Close() {
-    if (m_Impl && m_Impl->Channel && !m_Impl->Channel->is_closed()) {
-        try { m_Impl->Channel->close(); } catch (...) {}
-    }
+    if (!m_Impl || !m_Impl->Channel || m_Impl->Channel->is_closed())
+        return;
+    try { m_Impl->Channel->close(); } 
+    catch (const std::runtime_error& e) {
+        spdlog::warn("[P2P-Crypto] Error during close: {}", e.what());
+    }   
 }
 
 bool BotanP2PCrypto::IsActivated() const {
@@ -511,6 +403,7 @@ bool BotanP2PCrypto::IsClosed() const {
     return !m_Impl || !m_Impl->Channel || m_Impl->Channel->is_closed();
 }
 
+// Update this string to reflect the algorithms you chose.
 std::string BotanP2PCrypto::ProtocolDescription() {
     return "TLS 1.3 | X25519/ML-KEM-768";
 }

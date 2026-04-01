@@ -10,6 +10,7 @@
 #ifdef __APPLE__
 
 #import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 namespace Safira {
 
