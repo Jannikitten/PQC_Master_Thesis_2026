@@ -6,10 +6,6 @@
 // The DTLS connection currently uses a CLASSICAL key-exchange scheme.
 // Your task is to modify the code in this class so that the DTLS 
 // handshake is protected against adversaries with quantum capabilities.
-//
-//
-// Note: it is not possible to connect to the server until the key exchange is 
-// quantum-safe
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "WolfSSLCrypto.h"
@@ -26,7 +22,7 @@
 namespace Safira {
 
 void WolfSSLCrypto::ConfigureKeyExchange(WOLFSSL_CTX* ctx) {
-    int groups[] = { WOLFSSL_ECC_X25519 };
+    int groups[] = { WOLFSSL_ECC_SECP256R1 };
     wolfSSL_CTX_set_groups(ctx, groups, 1);
 }
 
