@@ -19,106 +19,106 @@
 
 namespace Safira::Action {
 
-// ── Network events ──────────────────────────────────────────────────────────
+    // ── Network events ──
 
-struct ClientConnected {
-    ClientID    ID;
-    std::string Address;
-};
+    struct ClientConnected {
+        ClientID    ID;
+        std::string Address;
+    };
 
-struct ClientDisconnected {
-    ClientID    ID;
-};
+    struct ClientDisconnected {
+        ClientID    ID;
+    };
 
-struct DataReceived {
-    ClientID           ID;
-    std::vector<uint8_t> Payload;
-};
+    struct DataReceived {
+        ClientID           ID;
+        std::vector<uint8_t> Payload;
+    };
 
-// ── Parsed packet actions (from DataReceived after deserialization) ──────────
+    // ── Parsed packet actions (from DataReceived after deserialization) ──
 
-struct MessageReceived {
-    ClientID    From;
-    std::string Message;
-};
+    struct MessageReceived {
+        ClientID    From;
+        std::string Message;
+    };
 
-struct ConnectionRequested {
-    ClientID                ID;
-    std::string             Address;
-    ConnectionRequestPacket Packet;
-};
+    struct ConnectionRequested {
+        ClientID                ID;
+        std::string             Address;
+        ConnectionRequestPacket Packet;
+    };
 
-struct PrivateChatInviteReceived {
-    ClientID    From;
-    std::string TargetUsername;
-};
+    struct PrivateChatInviteReceived {
+        ClientID    From;
+        std::string TargetUsername;
+    };
 
-struct PrivateChatResponseReceived {
-    ClientID                  From;
-    PrivateChatResponsePacket Packet;
-};
+    struct PrivateChatResponseReceived {
+        ClientID                  From;
+        PrivateChatResponsePacket Packet;
+    };
 
-// ── Admin commands ──────────────────────────────────────────────────────────
+    // ── Admin commands ──
 
-struct KickCommand {
-    std::string Username;
-    std::string Reason;
-};
+    struct KickCommand {
+        std::string Username;
+        std::string Reason;
+    };
 
-struct MuteCommand {
-    std::string Username;
-};
+    struct MuteCommand {
+        std::string Username;
+    };
 
-struct UnmuteCommand {
-    std::string Username;
-};
+    struct UnmuteCommand {
+        std::string Username;
+    };
 
-struct BroadcastCommand {
-    std::string Message;
-};
+    struct BroadcastCommand {
+        std::string Message;
+    };
 
-struct SetMotdCommand {
-    std::string Message;  // empty = clear
-};
+    struct SetMotdCommand {
+        std::string Message;  // empty = clear
+    };
 
-struct SendChatMessage {
-    std::string Message;
-};
+    struct SendChatMessage {
+        std::string Message;
+    };
 
-// ── Lifecycle ───────────────────────────────────────────────────────────────
+    // ── Lifecycle ──
 
-struct Tick {
-    float DeltaTime;
-};
+    struct Tick {
+        float DeltaTime;
+    };
 
-struct Shutdown {};
+    struct Shutdown {};
 
-struct HistoryLoaded {
-    std::vector<Safira::ChatMessage> Messages;
-};
+    struct HistoryLoaded {
+        std::vector<Safira::ChatMessage> Messages;
+    };
 
 } // namespace Safira::Action
 
 namespace Safira {
 
-using ServerAction = std::variant<
-    Action::ClientConnected,
-    Action::ClientDisconnected,
-    Action::DataReceived,
-    Action::MessageReceived,
-    Action::ConnectionRequested,
-    Action::PrivateChatInviteReceived,
-    Action::PrivateChatResponseReceived,
-    Action::KickCommand,
-    Action::MuteCommand,
-    Action::UnmuteCommand,
-    Action::BroadcastCommand,
-    Action::SetMotdCommand,
-    Action::SendChatMessage,
-    Action::Tick,
-    Action::Shutdown,
-    Action::HistoryLoaded
->;
+    using ServerAction = std::variant<
+        Action::ClientConnected,
+        Action::ClientDisconnected,
+        Action::DataReceived,
+        Action::MessageReceived,
+        Action::ConnectionRequested,
+        Action::PrivateChatInviteReceived,
+        Action::PrivateChatResponseReceived,
+        Action::KickCommand,
+        Action::MuteCommand,
+        Action::UnmuteCommand,
+        Action::BroadcastCommand,
+        Action::SetMotdCommand,
+        Action::SendChatMessage,
+        Action::Tick,
+        Action::Shutdown,
+        Action::HistoryLoaded
+    >;
 
 } // namespace Safira
 

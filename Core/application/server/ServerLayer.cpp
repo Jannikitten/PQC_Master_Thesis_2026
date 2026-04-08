@@ -23,12 +23,12 @@
 
 #include <spdlog/spdlog.h>
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 // Lifecycle
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ServerLayer::OnAttach() {
-    // ── Create and start the DTLS server ────────────────────────────────
+    // ── Create and start the DTLS server ──
     Safira::ServerConfig config;
     config.Port                    = 8192;
     config.MaxClients              = 64;
@@ -36,7 +36,7 @@ void ServerLayer::OnAttach() {
 
     m_Server = std::make_unique<Safira::Server>(config);
 
-    // ── Build the effect handler (binds infrastructure) ─────────────────
+    // ── Build the effect handler (binds infrastructure) ──
     Safira::Middleware::ServerEffectHandler effectHandler;
 
     effectHandler.SendToClient = [this](Safira::ClientID id, Safira::ByteSpan buf) {
@@ -69,7 +69,7 @@ void ServerLayer::OnAttach() {
             m_Console.AddTaggedMessage(tag, "{}", msg);
     };
 
-    // ── Create the wired store ──────────────────────────────────────────
+    // ── Create the wired store ──
     Safira::ServerState initialState;
     initialState.Port       = config.Port;
     initialState.MaxClients = config.MaxClients;
@@ -77,7 +77,7 @@ void ServerLayer::OnAttach() {
     m_Store = Safira::CreateServerStore(
         std::move(initialState), std::move(effectHandler));
 
-    // ── Wire server callbacks → Store dispatch ──────────────────────────
+    // ── Wire server callbacks → Store dispatch ──
     m_Server->OnClientConnected([this](Safira::ClientInfo& c) {
         const Safira::ClientID id = c.ID;
         const std::string addr = c.AddressStr;
@@ -103,7 +103,7 @@ void ServerLayer::OnAttach() {
 
     m_Server->Start();
 
-    // ── Load message history ────────────────────────────────────────────
+    // ── Load message history ──
     m_MessageHistoryFilePath = "MessageHistory.yaml";
     m_Console.AddTaggedMessage("Info", "Loading message history...");
     LoadMessageHistory();
@@ -144,12 +144,12 @@ void ServerLayer::OnUpdate(float ts) {
 
 void ServerLayer::OnUIRender() { m_Console.OnUIRender(); }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 // Console command handling
 //
 // Commands that modify state dispatch actions to the Store.
 // Read-only commands (/list, /stats, /help) read directly from state.
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ServerLayer::SendChatMessage(std::string_view message) {
     if (!message.empty() && message[0] == '/') {
@@ -173,11 +173,11 @@ void ServerLayer::OnCommand(std::string_view command) {
 
     const auto& cmd = tokens[0];
 
-    // ── /kick <username> [reason] ───────────────────────────────────────
+    // ── /kick <username> [reason] ──
     if (cmd == "kick") {
         if (tokens.size() >= 2) {
             std::string reason;
-            for (size_t i = 2; i < tokens.size(); ++i) {
+            for (std::size_t i = 2; i < tokens.size(); ++i) {
                 if (!reason.empty()) reason += ' ';
                 reason += std::string(tokens[i]);
             }
@@ -187,7 +187,7 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Console.AddItalicMessage("Usage: /kick <username> [reason]");
         }
     }
-    // ── /list — show connected users (read-only) ────────────────────────
+    // ── /list — show connected users (read-only) ──
     else if (cmd == "list") {
         const auto& state = m_Store->GetState();
         m_Console.AddItalicMessage("Connected clients ({}/{}):",
@@ -198,7 +198,7 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Console.AddItalicMessage("  {}", info.Username);
         }
     }
-    // ── /stats — server statistics (read-only) ──────────────────────────
+    // ── /stats — server statistics (read-only) ──
     else if (cmd == "stats") {
         const auto& state = m_Store->GetState();
         m_Console.AddItalicMessage("Server stats:");
@@ -209,11 +209,11 @@ void ServerLayer::OnCommand(std::string_view command) {
                                    state.MessageHistory.size());
         m_Console.AddItalicMessage("  Muted:    {}", state.MutedUsers.size());
     }
-    // ── /broadcast <message> — server announcement ──────────────────────
+    // ── /broadcast <message> — server announcement ──
     else if (cmd == "broadcast") {
         if (tokens.size() >= 2) {
             std::string msg;
-            for (size_t i = 1; i < tokens.size(); ++i) {
+            for (std::size_t i = 1; i < tokens.size(); ++i) {
                 if (!msg.empty()) msg += ' ';
                 msg += std::string(tokens[i]);
             }
@@ -222,11 +222,11 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Console.AddItalicMessage("Usage: /broadcast <message>");
         }
     }
-    // ── /motd [message] — set or clear the message of the day ───────────
+    // ── /motd [message] — set or clear the message of the day ──
     else if (cmd == "motd") {
         if (tokens.size() >= 2) {
             std::string motd;
-            for (size_t i = 1; i < tokens.size(); ++i) {
+            for (std::size_t i = 1; i < tokens.size(); ++i) {
                 if (!motd.empty()) motd += ' ';
                 motd += std::string(tokens[i]);
             }
@@ -235,7 +235,7 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Store->Dispatch(Safira::Action::SetMotdCommand{ "" });
         }
     }
-    // ── /mute <username> ────────────────────────────────────────────────
+    // ── /mute <username> ──
     else if (cmd == "mute") {
         if (tokens.size() == 2) {
             m_Store->Dispatch(Safira::Action::MuteCommand{
@@ -244,7 +244,7 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Console.AddItalicMessage("Usage: /mute <username>");
         }
     }
-    // ── /unmute <username> ──────────────────────────────────────────────
+    // ── /unmute <username> ──
     else if (cmd == "unmute") {
         if (tokens.size() == 2) {
             m_Store->Dispatch(Safira::Action::UnmuteCommand{
@@ -253,7 +253,7 @@ void ServerLayer::OnCommand(std::string_view command) {
             m_Console.AddItalicMessage("Usage: /unmute <username>");
         }
     }
-    // ── /help ───────────────────────────────────────────────────────────
+    // ── /help ──
     else if (cmd == "help") {
         m_Console.AddItalicMessage("Available commands:");
         m_Console.AddItalicMessage("  /kick <user> [reason]  — disconnect a user");
@@ -265,15 +265,15 @@ void ServerLayer::OnCommand(std::string_view command) {
         m_Console.AddItalicMessage("  /motd [msg]            — set/clear message of the day");
         m_Console.AddItalicMessage("  /help                  — this message");
     }
-    // ── Unknown ─────────────────────────────────────────────────────────
+    // ── Unknown ──
     else {
         m_Console.AddItalicMessage("Unknown command: /{}. Type /help for a list.", cmd);
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 // Persistence
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ServerLayer::SaveMessageHistory(const std::vector<Safira::ChatMessage>& history) {
     YAML::Emitter out;
@@ -320,9 +320,9 @@ void ServerLayer::LoadMessageHistory() {
     m_Store->Dispatch(Safira::Action::HistoryLoaded{ std::move(messages) });
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 // Thread-safe event queue
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ServerLayer::EnqueueEvent(std::function<void()>&& fn) {
     std::lock_guard lock(m_EventMutex);

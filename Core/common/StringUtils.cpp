@@ -2,9 +2,8 @@
 
 namespace Safira::Utils {
 
-    std::vector<std::string> SplitString(const std::string_view string, const std::string_view& delimiters)
-    {
-        size_t first = 0;
+    std::vector<std::string> SplitString(const std::string_view string, const std::string_view& delimiters) {
+        std::size_t first = 0;
 
         std::vector<std::string> result;
 
@@ -24,8 +23,7 @@ namespace Safira::Utils {
         return result;
     }
 
-    std::vector<std::string> SplitString(const std::string_view string, const char delimiter)
-    {
+    std::vector<std::string> SplitString(const std::string_view string, const char delimiter) {
         return SplitString(string, std::string(1, delimiter));
     }
 

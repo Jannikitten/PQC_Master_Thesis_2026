@@ -2,8 +2,6 @@
 #define SAFIRA_APPLICATION_STORE_EFFECT_H
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Effect.h — Side-effect description types
-//
 // Effects are value types that describe what should happen, not how.
 // The effect middleware interprets them and calls into infrastructure.
 // This keeps reducers pure — they return effects alongside new state.
@@ -22,195 +20,195 @@
 
 namespace Safira::Effect {
 
-// ── No-op ───────────────────────────────────────────────────────────────────
+    // ── No-op ──
 
-struct None {};
+    struct None {};
 
-// ── Infrastructure effects (shared) ─────────────────────────────────────────
+    // ── Infrastructure effects (shared) ──
 
-struct KickClient {
-    ClientID    Target;
-};
+    struct KickClient {
+        ClientID    Target;
+    };
 
-struct Disconnect {};
+    struct Disconnect {};
 
-struct SaveHistory {};
+    struct SaveHistory {};
 
-struct LoadHistory {};
+    struct LoadHistory {};
 
-struct LogMessage {
-    std::string Message;
-    enum class Level { Info, Italic, Tagged } Type = Level::Info;
-    std::string Tag;
-    uint32_t    Color = 0;
-};
+    struct LogMessage {
+        std::string Message;
+        enum class Level { Info, Italic, Tagged } Type = Level::Info;
+        std::string Tag;
+        uint32_t    Color = 0;
+    };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Server protocol effects — typed descriptions of outbound packets
-//
-// The reducer produces these to describe which packets to send.
-// The effect middleware serializes them using SerializePacket and
-// calls into the network adapter.
-// ═════════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Server protocol effects — typed descriptions of outbound packets
+    //
+    // The reducer produces these to describe which packets to send.
+    // The effect middleware serializes them using SerializePacket and
+    // calls into the network adapter.
+    // ─────────────────────────────────────────────────────────────────────────────
 
-struct SendConnectionResponse {
-    ClientID Target;
-    bool     Accepted;
-};
+    struct SendConnectionResponse {
+        ClientID Target;
+        bool     Accepted;
+    };
 
-struct BroadcastClientConnect {
-    ClientID NewClient;        // send this client's info to all
-};
+    struct BroadcastClientConnect {
+        ClientID NewClient;        // send this client's info to all
+    };
 
-struct SendClientListTo {
-    ClientID Target;
-};
+    struct SendClientListTo {
+        ClientID Target;
+    };
 
-struct SendClientListToAll {};
+    struct SendClientListToAll {};
 
-struct SendMessageHistoryTo {
-    ClientID Target;
-};
+    struct SendMessageHistoryTo {
+        ClientID Target;
+    };
 
-struct BroadcastServerMessage {
-    std::string From;
-    std::string Message;
-    ClientID    Exclude {};    // optional: skip this client
-};
+    struct BroadcastServerMessage {
+        std::string From;
+        std::string Message;
+        ClientID    Exclude {};    // optional: skip this client
+    };
 
-struct BroadcastClientDisconnect {
-    UserInfo Client;
-    ClientID Exclude {};       // skip the disconnected client
-};
+    struct BroadcastClientDisconnect {
+        UserInfo Client;
+        ClientID Exclude {};       // skip the disconnected client
+    };
 
-struct SendServerShutdownToAll {};
+    struct SendServerShutdownToAll {};
 
-struct SendKickNotification {
-    ClientID    Target;
-    std::string Reason;
-};
+    struct SendKickNotification {
+        ClientID    Target;
+        std::string Reason;
+    };
 
-struct ForwardPrivateChatInvite {
-    ClientID    Target;
-    std::string FromUsername;
-};
+    struct ForwardPrivateChatInvite {
+        ClientID    Target;
+        std::string FromUsername;
+    };
 
-struct ForwardPrivateChatConnectTo {
-    ClientID    Target;
-    std::string PeerUsername;
-    std::string Address;
-};
+    struct ForwardPrivateChatConnectTo {
+        ClientID    Target;
+        std::string PeerUsername;
+        std::string Address;
+    };
 
-struct ForwardPrivateChatDeclined {
-    ClientID    Target;
-    std::string PeerUsername;
-};
+    struct ForwardPrivateChatDeclined {
+        ClientID    Target;
+        std::string PeerUsername;
+    };
 
-struct SendMotdTo {
-    ClientID Target;
-};
+    struct SendMotdTo {
+        ClientID Target;
+    };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Client protocol effects — typed descriptions of outbound packets
-//
-// Same pattern as server: the reducer describes WHAT to send;
-// the effect middleware serializes and sends.
-// ═════════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Client protocol effects — typed descriptions of outbound packets
+    //
+    // Same pattern as server: the reducer describes WHAT to send;
+    // the effect middleware serializes and sends.
+    // ─────────────────────────────────────────────────────────────────────────────
 
-struct SendChatMessageToServer {
-    std::string Message;
-};
+    struct SendChatMessageToServer {
+        std::string Message;
+    };
 
-struct SendConnectionRequestToServer {
-    std::string              Username;
-    uint32_t                 Color;
-    std::vector<uint8_t>     AvatarData;
-};
+    struct SendConnectionRequestToServer {
+        std::string              Username;
+        uint32_t                 Color;
+        std::vector<uint8_t>     AvatarData;
+    };
 
-struct SendPrivateChatInviteToServer {
-    std::string TargetUsername;
-};
+    struct SendPrivateChatInviteToServer {
+        std::string TargetUsername;
+    };
 
-struct SendPrivateChatResponseToServer {
-    std::string PeerUsername;
-    bool        Accepted;
-    uint16_t    ListenPort;
-};
+    struct SendPrivateChatResponseToServer {
+        std::string PeerUsername;
+        bool        Accepted;
+        uint16_t    ListenPort;
+    };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Client infrastructure effects
-// ═════════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Client infrastructure effects
+    // ─────────────────────────────────────────────────────────────────────────────
 
-struct ConnectToServer {
-    std::string Address;
-};
+    struct ConnectToServer {
+        std::string Address;
+    };
 
-struct SaveConnectionDetails {};
+    struct SaveConnectionDetails {};
 
-struct StartP2PAsResponder {
-    std::string PeerUsername;
-};
+    struct StartP2PAsResponder {
+        std::string PeerUsername;
+    };
 
-struct StartP2PAsInitiator {
-    std::string PeerUsername;
-    std::string PeerAddress;
-};
+    struct StartP2PAsInitiator {
+        std::string PeerUsername;
+        std::string PeerAddress;
+    };
 
-struct CloseP2PSession {
-    std::string PeerUsername;
-};
+    struct CloseP2PSession {
+        std::string PeerUsername;
+    };
 
-struct CloseAllP2PSessions {};
+    struct CloseAllP2PSessions {};
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ServerEffect / ClientEffect — variant of all possible effects
-// ═════════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ServerEffect / ClientEffect — variant of all possible effects
+    // ─────────────────────────────────────────────────────────────────────────────
 
-using ServerEffect = std::variant<
-    None,
-    // Protocol effects (describe what to send — middleware serializes)
-    SendConnectionResponse,
-    BroadcastClientConnect,
-    SendClientListTo,
-    SendClientListToAll,
-    SendMessageHistoryTo,
-    BroadcastServerMessage,
-    BroadcastClientDisconnect,
-    SendServerShutdownToAll,
-    SendKickNotification,
-    ForwardPrivateChatInvite,
-    ForwardPrivateChatConnectTo,
-    ForwardPrivateChatDeclined,
-    SendMotdTo,
-    // Infrastructure effects
-    KickClient,
-    SaveHistory,
-    LoadHistory,
-    LogMessage
->;
+    using ServerEffect = std::variant<
+        None,
+        // Protocol effects (describe what to send — middleware serializes)
+        SendConnectionResponse,
+        BroadcastClientConnect,
+        SendClientListTo,
+        SendClientListToAll,
+        SendMessageHistoryTo,
+        BroadcastServerMessage,
+        BroadcastClientDisconnect,
+        SendServerShutdownToAll,
+        SendKickNotification,
+        ForwardPrivateChatInvite,
+        ForwardPrivateChatConnectTo,
+        ForwardPrivateChatDeclined,
+        SendMotdTo,
+        // Infrastructure effects
+        KickClient,
+        SaveHistory,
+        LoadHistory,
+        LogMessage
+    >;
 
-using ClientEffect = std::variant<
-    None,
-    // Protocol effects (describe what to send — middleware serializes)
-    SendChatMessageToServer,
-    SendConnectionRequestToServer,
-    SendPrivateChatInviteToServer,
-    SendPrivateChatResponseToServer,
-    // Infrastructure effects
-    ConnectToServer,
-    Disconnect,
-    SaveConnectionDetails,
-    StartP2PAsResponder,
-    StartP2PAsInitiator,
-    CloseP2PSession,
-    CloseAllP2PSessions,
-    LogMessage
->;
+    using ClientEffect = std::variant<
+        None,
+        // Protocol effects (describe what to send — middleware serializes)
+        SendChatMessageToServer,
+        SendConnectionRequestToServer,
+        SendPrivateChatInviteToServer,
+        SendPrivateChatResponseToServer,
+        // Infrastructure effects
+        ConnectToServer,
+        Disconnect,
+        SaveConnectionDetails,
+        StartP2PAsResponder,
+        StartP2PAsInitiator,
+        CloseP2PSession,
+        CloseAllP2PSessions,
+        LogMessage
+    >;
 
-// ── Batch helper ────────────────────────────────────────────────────────────
+    // ── Batch helper ──
 
-template <typename EffectVariant>
-using EffectBatch = std::vector<EffectVariant>;
+    template <typename EffectVariant>
+    using EffectBatch = std::vector<EffectVariant>;
 
 } // namespace Safira::Effect
 

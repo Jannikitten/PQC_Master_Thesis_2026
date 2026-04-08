@@ -16,17 +16,17 @@ using Safira::Theme;
 
 #include <spdlog/spdlog.h>
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Store dispatch helper
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::Dispatch(Safira::ClientActionVariant action) {
     m_Store->Dispatch(std::move(action));
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Layer lifecycle
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::OnAttach() {
     m_Client = std::make_unique<Safira::Client>();
@@ -69,9 +69,9 @@ void ClientLayer::OnAttach() {
     Safira::ApplicationGUI::Get().m_OnLogout = [this]() { Logout(); };
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // WireEffectHandler
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::WireEffectHandler(
     Safira::Middleware::ClientEffectHandler& h)
@@ -159,9 +159,9 @@ void ClientLayer::WireEffectHandler(
     };
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // WireViewCallbacks
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::WireViewCallbacks() {
     m_ConnectionView.SetOnConnect([this](const std::string& addr,
@@ -221,9 +221,9 @@ void ClientLayer::WireViewCallbacks() {
         });
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // WireInfrastructureCallbacks
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::WireInfrastructureCallbacks() {
     auto& app = Safira::ApplicationGUI::Get();
@@ -284,9 +284,9 @@ void ClientLayer::WireInfrastructureCallbacks() {
     });
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // OnDetach / OnUIRender / IsConnected / OnDisconnectButton
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::OnDetach() {
     for (auto& [name, session] : m_PrivateChats)
@@ -328,9 +328,9 @@ void ClientLayer::OnDisconnectButton() {
     Dispatch(Safira::ClientAction::DisconnectRequested{});
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // OnActionProcessed -- presentation sync after store state update
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::OnActionProcessed(
     const Safira::ClientActionVariant& action,
@@ -475,9 +475,9 @@ void ClientLayer::OnActionProcessed(
     }, action);
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // AddLobbyMessage
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::AddLobbyMessage(const std::string& who,
                                   const std::string& text,
@@ -507,9 +507,9 @@ void ClientLayer::AddLobbyMessage(const std::string& who,
         m_ChatPanel.RequestScrollToBottom();
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // RebuildConversationList
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::RebuildConversationList() {
     m_ConversationList.clear();
@@ -548,9 +548,9 @@ void ClientLayer::RebuildConversationList() {
     }
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Logout / LeavePrivateChat
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::Logout() {
     Dispatch(Safira::ClientAction::DisconnectRequested{});
@@ -581,9 +581,9 @@ void ClientLayer::LeavePrivateChat(const std::string& peerUsername) {
         Theme::Get().TextSystem, Safira::MessageRole::System);
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // RenderChatWindow -- data preparation + dispatch (zero ImGui code)
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::RenderChatWindow() {
     if (!Safira::ApplicationGUI::Get().IsChatPanelVisible())
@@ -593,7 +593,7 @@ void ClientLayer::RenderChatWindow() {
 
     const auto& state = m_Store->GetState();
 
-    // -- Build layout input --------------------------------------------------
+    // ── Build layout input ──
     Safira::FullLayoutInput input;
 
     // User list entries
@@ -656,7 +656,7 @@ void ClientLayer::RenderChatWindow() {
     input.SuppressOverlay = !IsConnected()
         || (m_Store && !m_Store->GetState().IncomingInvites.empty());
 
-    // -- Render and handle output --------------------------------------------
+    // ── Render and handle output ──
     auto output = m_ChatPanel.RenderFullLayout(input);
 
     if (output.NewActiveIdx)
@@ -683,9 +683,9 @@ void ClientLayer::RenderChatWindow() {
     }
 }
 
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 // Persistence
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientLayer::SaveConnectionDetails(
     const std::filesystem::path& filepath)

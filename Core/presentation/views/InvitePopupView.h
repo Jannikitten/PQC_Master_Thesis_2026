@@ -1,11 +1,9 @@
 #ifndef PQC_MASTER_THESIS_2026_INVITEPOPUPVIEW_H
 #define PQC_MASTER_THESIS_2026_INVITEPOPUPVIEW_H
 
-// =============================================================================
-// InvitePopupView.h -- Incoming P2P private chat invite notification
-//
+// ═══════════════════════════════════════════════════════════════════════════════
 // Header-only. Pure view component (no Store dependency).
-// =============================================================================
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #include "Theme.h"
 

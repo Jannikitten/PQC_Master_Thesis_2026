@@ -1,23 +1,6 @@
 #ifndef PQC_MASTER_THESIS_2026_SERIALIZATION_H
 #define PQC_MASTER_THESIS_2026_SERIALIZATION_H
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Serialization.h — concept-based, non-virtual serialization system
-//
-// Replaces the old virtual StreamWriter / StreamReader hierarchy with
-// concrete BufferWriter / BufferReader classes and free-function overloads
-// constrained by C++20/23 concepts.
-//
-// §3.2  Result types   – deserialize<T>() returns std::expected<T, ParseError>
-// §5.3  Serialization  – same wire format as the old system (binary-compatible)
-// C++23               – concepts, std::expected, std::span
-//
-// Wire format:
-//   Trivially-copyable types: raw memcpy of sizeof(T) bytes
-//   Strings:  uint32_t + char data
-//   Vectors:  uint32_t count + elements
-// ═════════════════════════════════════════════════════════════════════════════
-
 #include "Types.h"
 
 #include <concepts>
@@ -30,193 +13,193 @@
 
 namespace Safira {
 
-// Hard caps for untrusted wire lengths (DoS protection).
-static constexpr size_t   kMaxSerializedStringBytes   = 8 * 1024;      // 8 KiB
-static constexpr uint32_t kMaxSerializedVectorElements = 64 * 1024;    // 65,536 elems
-static constexpr uint32_t kMaxSerializedBinaryBytes    = 1024 * 1024;  // 1 MiB
+    // Hard caps for untrusted wire lengths (DoS protection).
+    static constexpr std::size_t   kMaxSerializedStringBytes   = 8 * 1024;      // 8 KiB
+    static constexpr uint32_t kMaxSerializedVectorElements = 64 * 1024;    // 65,536 elems
+    static constexpr uint32_t kMaxSerializedBinaryBytes    = 1024 * 1024;  // 1 MiB
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BufferWriter — writes into a pre-allocated or growable byte buffer
-//
-// Two modes:
-//   Fixed:   BufferWriter(MutableByteSpan)    — writes into a fixed region
-//   Growing: BufferWriter(ByteBuffer&)        — resizes the vector on demand
-// ─────────────────────────────────────────────────────────────────────────────
-class BufferWriter {
-public:
-    explicit BufferWriter(MutableByteSpan target, size_t pos = 0) noexcept
-        : m_Target(target.data()), m_Capacity(target.size()), m_Pos(pos) {}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // BufferWriter — writes into a pre-allocated or growable byte buffer
+    //
+    // Two modes:
+    //   Fixed:   BufferWriter(MutableByteSpan)    — writes into a fixed region
+    //   Growing: BufferWriter(ByteBuffer&)        — resizes the vector on demand
+    // ─────────────────────────────────────────────────────────────────────────────
+    class BufferWriter {
+    public:
+        explicit BufferWriter(MutableByteSpan target, std::size_t pos = 0) noexcept
+            : m_Target(target.data()), m_Capacity(target.size()), m_Pos(pos) {}
 
-    explicit BufferWriter(ByteBuffer& target, size_t pos = 0) noexcept
-        : m_Owned(&target), m_Target(target.data()), m_Capacity(target.size()), m_Pos(pos) {}
+        explicit BufferWriter(ByteBuffer& target, std::size_t pos = 0) noexcept
+            : m_Owned(&target), m_Target(target.data()), m_Capacity(target.size()), m_Pos(pos) {}
 
-    [[nodiscard]] bool WriteBytes(const void* data, size_t size) {
-        if (m_Owned) {
-            if (m_Pos + size > m_Capacity) {
-                m_Owned->resize(m_Pos + size);
-                m_Target   = m_Owned->data();
-                m_Capacity = m_Owned->size();
+        [[nodiscard]] bool WriteBytes(const void* data, std::size_t size) {
+            if (m_Owned) {
+                if (m_Pos + size > m_Capacity) {
+                    m_Owned->resize(m_Pos + size);
+                    m_Target   = m_Owned->data();
+                    m_Capacity = m_Owned->size();
+                }
+            } else {
+                if (m_Pos + size > m_Capacity) return false;
             }
-        } else {
-            if (m_Pos + size > m_Capacity) return false;
+            std::memcpy(m_Target + m_Pos, data, size);
+            m_Pos += size;
+            return true;
         }
-        std::memcpy(m_Target + m_Pos, data, size);
-        m_Pos += size;
+
+        [[nodiscard]] std::size_t GetPosition() const noexcept { return m_Pos; }
+        void SetPosition(std::size_t p) noexcept { m_Pos = p; }
+
+        /// View of bytes written so far.
+        [[nodiscard]] ByteSpan Written() const noexcept {
+            if (m_Owned) return ByteSpan(m_Owned->data(), m_Pos);
+            return ByteSpan(m_Target, m_Pos);
+        }
+
+    private:
+        ByteBuffer* m_Owned    = nullptr;
+        uint8_t*    m_Target   = nullptr;
+        std::size_t      m_Capacity = 0;
+        std::size_t      m_Pos      = 0;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // BufferReader — reads from a ByteSpan, all reads return std::expected
+    // ─────────────────────────────────────────────────────────────────────────────
+    class BufferReader {
+    public:
+        explicit BufferReader(ByteSpan source, std::size_t pos = 0) noexcept
+            : m_Source(source), m_Pos(pos) {}
+
+        [[nodiscard]] std::expected<void, ParseError> ReadBytes(void* dest, std::size_t size) {
+            if (m_Pos + size > m_Source.size())
+                return std::unexpected(ParseError::UnexpectedEnd);
+            std::memcpy(dest, m_Source.data() + m_Pos, size);
+            m_Pos += size;
+            return {};
+        }
+
+        [[nodiscard]] std::size_t GetPosition() const noexcept { return m_Pos; }
+        [[nodiscard]] std::size_t Remaining()   const noexcept { return m_Source.size() - m_Pos; }
+        void SetPosition(std::size_t p) noexcept { m_Pos = p; }
+
+    private:
+        ByteSpan m_Source;
+        std::size_t   m_Pos = 0;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Forward declarations for concept definitions
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    // Serialize: free function `Serialize(BufferWriter&, const T&) -> bool`
+    // found by ADL or in namespace Safira.
+    template <typename T>
+    concept Serializable = requires(BufferWriter& w, const T& val) {
+        { Serialize(w, val) } -> std::same_as<bool>;
+    };
+
+    // Deserialize: free function `Deserialize<T>(BufferReader&) -> expected<T, ParseError>`
+    // (checked at call-site, not via concept, since template functions can't be
+    //  discovered by a concept expression without an explicit specialization.)
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Built-in Serialize / Deserialize for trivially copyable types
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    template <typename T>
+        requires std::is_trivially_copyable_v<T> && (!std::is_same_v<T, std::string>)
+    [[nodiscard]] bool Serialize(BufferWriter& w, const T& val) {
+        return w.WriteBytes(&val, sizeof(T));
+    }
+
+    template <typename T>
+        requires std::is_trivially_copyable_v<T>
+    [[nodiscard]] std::expected<T, ParseError> Deserialize(BufferReader& r) {
+        T val;
+        auto result = r.ReadBytes(&val, sizeof(T));
+        if (!result) return std::unexpected(result.error());
+        return val;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // String serialization (wire format: uint32_t + char data)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [[nodiscard]] inline bool Serialize(BufferWriter& w, const std::string& s) {
+        if (s.size() > kMaxSerializedStringBytes) return false;
+        const auto size = static_cast<uint32_t>(s.size());
+        if (!w.WriteBytes(&size, sizeof(uint32_t))) return false;
+        if (size > 0 && !w.WriteBytes(s.data(), size)) return false;
         return true;
     }
 
-    [[nodiscard]] size_t GetPosition() const noexcept { return m_Pos; }
-    void SetPosition(size_t p) noexcept { m_Pos = p; }
-
-    /// View of bytes written so far.
-    [[nodiscard]] ByteSpan Written() const noexcept {
-        if (m_Owned) return ByteSpan(m_Owned->data(), m_Pos);
-        return ByteSpan(m_Target, m_Pos);
+    [[nodiscard]] inline bool Serialize(BufferWriter& w, std::string_view s) {
+        if (s.size() > kMaxSerializedStringBytes) return false;
+        const auto size = static_cast<uint32_t>(s.size());
+        if (!w.WriteBytes(&size, sizeof(uint32_t))) return false;
+        if (size > 0 && !w.WriteBytes(s.data(), size)) return false;
+        return true;
     }
 
-private:
-    ByteBuffer* m_Owned    = nullptr;
-    uint8_t*    m_Target   = nullptr;
-    size_t      m_Capacity = 0;
-    size_t      m_Pos      = 0;
-};
+    template <typename T>
+    std::expected<T, ParseError> Deserialize(BufferReader& r);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BufferReader — reads from a ByteSpan, all reads return std::expected
-// ─────────────────────────────────────────────────────────────────────────────
-class BufferReader {
-public:
-    explicit BufferReader(ByteSpan source, size_t pos = 0) noexcept
-        : m_Source(source), m_Pos(pos) {}
+    template <>
+    [[nodiscard]] inline std::expected<std::string, ParseError>
+    Deserialize<std::string>(BufferReader& r) {
+        auto sizeResult = Deserialize<uint32_t>(r);
+        if (!sizeResult) return std::unexpected(sizeResult.error());
 
-    [[nodiscard]] std::expected<void, ParseError> ReadBytes(void* dest, size_t size) {
-        if (m_Pos + size > m_Source.size())
+        const std::size_t size = static_cast<std::size_t>(*sizeResult);
+        if (size > kMaxSerializedStringBytes)
+            return std::unexpected(ParseError::StringTooLong);
+        if (r.Remaining() < size)
             return std::unexpected(ParseError::UnexpectedEnd);
-        std::memcpy(dest, m_Source.data() + m_Pos, size);
-        m_Pos += size;
-        return {};
+
+        std::string s(size, '\0');
+        auto readResult = r.ReadBytes(s.data(), size);
+        if (!readResult) return std::unexpected(readResult.error());
+        return s;
     }
 
-    [[nodiscard]] size_t GetPosition() const noexcept { return m_Pos; }
-    [[nodiscard]] size_t Remaining()   const noexcept { return m_Source.size() - m_Pos; }
-    void SetPosition(size_t p) noexcept { m_Pos = p; }
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Vector serialization (wire format: uint32_t count + elements)
+    //
+    // Matches the old StreamWriter::WriteArray exactly.
+    // ─────────────────────────────────────────────────────────────────────────────
 
-private:
-    ByteSpan m_Source;
-    size_t   m_Pos = 0;
-};
+    template <Serializable T>
+    [[nodiscard]] bool Serialize(BufferWriter& w, const std::vector<T>& vec) {
+        if (!Serialize(w, static_cast<uint32_t>(vec.size()))) return false;
+        for (const auto& elem : vec)
+            if (!Serialize(w, elem)) return false;
+        return true;
+    }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward declarations for concept definitions
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Serialize: free function `Serialize(BufferWriter&, const T&) -> bool`
-// found by ADL or in namespace Safira.
-template <typename T>
-concept Serializable = requires(BufferWriter& w, const T& val) {
-    { Serialize(w, val) } -> std::same_as<bool>;
-};
-
-// Deserialize: free function `Deserialize<T>(BufferReader&) -> expected<T, ParseError>`
-// (checked at call-site, not via concept, since template functions can't be
-//  discovered by a concept expression without an explicit specialization.)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Built-in Serialize / Deserialize for trivially copyable types
-// ─────────────────────────────────────────────────────────────────────────────
-
-template <typename T>
-    requires std::is_trivially_copyable_v<T> && (!std::is_same_v<T, std::string>)
-[[nodiscard]] bool Serialize(BufferWriter& w, const T& val) {
-    return w.WriteBytes(&val, sizeof(T));
-}
-
-template <typename T>
-    requires std::is_trivially_copyable_v<T>
-[[nodiscard]] std::expected<T, ParseError> Deserialize(BufferReader& r) {
-    T val;
-    auto result = r.ReadBytes(&val, sizeof(T));
-    if (!result) return std::unexpected(result.error());
-    return val;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// String serialization (wire format: uint32_t + char data)
-// ─────────────────────────────────────────────────────────────────────────────
-
-[[nodiscard]] inline bool Serialize(BufferWriter& w, const std::string& s) {
-    if (s.size() > kMaxSerializedStringBytes) return false;
-    const auto size = static_cast<uint32_t>(s.size());
-    if (!w.WriteBytes(&size, sizeof(uint32_t))) return false;
-    if (size > 0 && !w.WriteBytes(s.data(), size)) return false;
-    return true;
-}
-
-[[nodiscard]] inline bool Serialize(BufferWriter& w, std::string_view s) {
-    if (s.size() > kMaxSerializedStringBytes) return false;
-    const auto size = static_cast<uint32_t>(s.size());
-    if (!w.WriteBytes(&size, sizeof(uint32_t))) return false;
-    if (size > 0 && !w.WriteBytes(s.data(), size)) return false;
-    return true;
-}
-
-template <typename T>
-std::expected<T, ParseError> Deserialize(BufferReader& r);
-
-template <>
-[[nodiscard]] inline std::expected<std::string, ParseError>
-Deserialize<std::string>(BufferReader& r) {
-    auto sizeResult = Deserialize<uint32_t>(r);
-    if (!sizeResult) return std::unexpected(sizeResult.error());
-
-    const size_t size = static_cast<size_t>(*sizeResult);
-    if (size > kMaxSerializedStringBytes)
-        return std::unexpected(ParseError::StringTooLong);
-    if (r.Remaining() < size)
-        return std::unexpected(ParseError::UnexpectedEnd);
-
-    std::string s(size, '\0');
-    auto readResult = r.ReadBytes(s.data(), size);
-    if (!readResult) return std::unexpected(readResult.error());
-    return s;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Vector serialization (wire format: uint32_t count + elements)
-//
-// Matches the old StreamWriter::WriteArray exactly.
-// ─────────────────────────────────────────────────────────────────────────────
-
-template <Serializable T>
-[[nodiscard]] bool Serialize(BufferWriter& w, const std::vector<T>& vec) {
-    if (!Serialize(w, static_cast<uint32_t>(vec.size()))) return false;
-    for (const auto& elem : vec)
-        if (!Serialize(w, elem)) return false;
-    return true;
-}
-
-template <typename T>
-[[nodiscard]] std::expected<std::vector<T>, ParseError>
-DeserializeVector(BufferReader& r) {
-    auto count = Deserialize<uint32_t>(r);
-    if (!count) return std::unexpected(count.error());
-    if (*count > kMaxSerializedVectorElements)
-        return std::unexpected(ParseError::InvalidData);
-
-    if constexpr (std::is_same_v<T, uint8_t>) {
-        if (*count > kMaxSerializedBinaryBytes)
+    template <typename T>
+    [[nodiscard]] std::expected<std::vector<T>, ParseError>
+    DeserializeVector(BufferReader& r) {
+        auto count = Deserialize<uint32_t>(r);
+        if (!count) return std::unexpected(count.error());
+        if (*count > kMaxSerializedVectorElements)
             return std::unexpected(ParseError::InvalidData);
-    }
 
-    std::vector<T> vec;
-    vec.reserve(*count);
-    for (uint32_t i = 0; i < *count; ++i) {
-        auto elem = Deserialize<T>(r);
-        if (!elem) return std::unexpected(elem.error());
-        vec.push_back(std::move(*elem));
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            if (*count > kMaxSerializedBinaryBytes)
+                return std::unexpected(ParseError::InvalidData);
+        }
+
+        std::vector<T> vec;
+        vec.reserve(*count);
+        for (uint32_t i = 0; i < *count; ++i) {
+            auto elem = Deserialize<T>(r);
+            if (!elem) return std::unexpected(elem.error());
+            vec.push_back(std::move(*elem));
+        }
+        return vec;
     }
-    return vec;
-}
 
 } // namespace Safira
 

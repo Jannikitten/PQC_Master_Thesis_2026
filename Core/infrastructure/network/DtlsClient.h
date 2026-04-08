@@ -1,20 +1,6 @@
 #ifndef PQC_MASTER_THESIS_2026_CLIENT_H
 #define PQC_MASTER_THESIS_2026_CLIENT_H
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Client.h — DTLS 1.3 client with ML-KEM-512 post-quantum key exchange
-//
-// Refactored following Kleppmann & Hugenroth, "Cryptography and Protocol
-// Engineering", Cambridge P79, Lent 2025.
-//
-//  §3.2  Result types     – std::expected with monadic and_then / transform
-//                           for the init pipeline (resolve → socket → TLS).
-//  §3.4  Typestate         – ConnectionPhase = variant<Handshaking, Connected>
-//                           replaces the bare bool m_HandshakeFinished.
-//  §5.5  Secret lifetimes – WolfContext / WolfSession (RAII, from WolfTypes.h)
-//  §5.5  Opinionated API  – "reliable" flag removed; DTLS is best-effort.
-// ═════════════════════════════════════════════════════════════════════════════
-
 #include "Types.h"
 #include "Connection.h"
 #include "NetworkExecutor.h"
@@ -32,179 +18,177 @@
 
 namespace Safira {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// §3.2 — Result types  (Slides 88-89)
-// ─────────────────────────────────────────────────────────────────────────────
-enum class ClientError : uint8_t {
-    AddressParse,
-    HostResolve,
-    SocketCreation,
-    SocketConnect,
-    ContextInit,
-    TrustStoreLoad,
-    SessionCreation,
-    HandshakeInit,
-};
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Result types
+    // ─────────────────────────────────────────────────────────────────────────────
+    enum class ClientError : uint8_t {
+        AddressParse,
+        HostResolve,
+        SocketCreation,
+        SocketConnect,
+        ContextInit,
+        TrustStoreLoad,
+        SessionCreation,
+        HandshakeInit,
+    };
 
-[[nodiscard]] constexpr std::string_view Describe(ClientError e) noexcept {
-    switch (e) {
-        case ClientError::AddressParse:    return "could not parse host:port";
-        case ClientError::HostResolve:     return "could not resolve hostname";
-        case ClientError::SocketCreation:  return "failed to create UDP socket";
-        case ClientError::SocketConnect:   return "UDP connect() failed";
-        case ClientError::ContextInit:     return "wolfSSL_CTX_new failed";
-        case ClientError::TrustStoreLoad:  return "failed to load trusted server certificate";
-        case ClientError::SessionCreation: return "wolfSSL_new failed";
-        case ClientError::HandshakeInit:   return "wolfSSL_connect initiation failed";
-    }
-    return "unknown error";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// §3.4 — Typestate  (Slides 111-115)
-//
-// Internal network-thread state.  The main loop dispatches via std::visit
-// so the compiler enforces every phase is handled.  Replaces the old
-// m_HandshakeFinished bool.
-// ─────────────────────────────────────────────────────────────────────────────
-struct Handshaking {};
-struct Connected   {};
-
-using ConnectionPhase = std::variant<Handshaking, Connected>;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// §5.5 — Init resources bundle for the monadic pipeline.
-// ─────────────────────────────────────────────────────────────────────────────
-struct ParsedAddress {
-    std::string Host;
-    uint16_t    Port = 0;
-};
-
-struct ClientResources {
-    int         Socket;
-    WolfContext  Ctx;
-    WolfSession  SSL;
-};
-
-struct PendingClientSend {
-    std::vector<uint8_t> Data;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Client
-// ─────────────────────────────────────────────────────────────────────────────
-class Client {
-public:
-    using DataReceivedCallback       = std::function<void(ByteSpan)>;
-    using ServerConnectedCallback    = std::function<void()>;
-    using ServerDisconnectedCallback = std::function<void()>;
-
-    Client()  = default;
-    ~Client();
-
-    Client(const Client&)            = delete;
-    Client& operator=(const Client&) = delete;
-
-    /// address = "ip:port" or "hostname:port"
-    void ConnectToServer(std::string_view address);
-
-    /// Full disconnect — blocks until the network thread exits.
-    /// Call from outside the network thread (UI, app shutdown).
-    void Disconnect();
-
-    /// Signal the network thread to stop and disconnect gracefully.
-    /// The network thread will send close_notify before shutting down,
-    /// so the server knows the client left (critical for DTLS/UDP where
-    /// there is no TCP FIN).
-    void RequestDisconnect() noexcept {
-        m_Running.store(false, std::memory_order_release);
+    [[nodiscard]] constexpr std::string_view Describe(ClientError e) noexcept {
+        switch (e) {
+            case ClientError::AddressParse:    return "could not parse host:port";
+            case ClientError::HostResolve:     return "could not resolve hostname";
+            case ClientError::SocketCreation:  return "failed to create UDP socket";
+            case ClientError::SocketConnect:   return "UDP connect() failed";
+            case ClientError::ContextInit:     return "wolfSSL_CTX_new failed";
+            case ClientError::TrustStoreLoad:  return "failed to load trusted server certificate";
+            case ClientError::SessionCreation: return "wolfSSL_new failed";
+            case ClientError::HandshakeInit:   return "wolfSSL_connect initiation failed";
+        }
+        return "unknown error";
     }
 
-    [[nodiscard]] bool IsConnected() const noexcept {
-        return m_ConnectionStatus.load(std::memory_order_acquire)
-               == ConnectionStatus::Connected;
-    }
-    [[nodiscard]] ConnectionStatus GetConnectionStatus() const noexcept {
-        return m_ConnectionStatus.load(std::memory_order_acquire);
-    }
-    [[nodiscard]] std::string GetConnectionDebugMessage() const {
-        std::lock_guard lock(m_StateMutex);
-        return m_ConnectionDebugMessage;
-    }
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Typestate
+    //
+    // Internal network-thread state.  The main loop dispatches via std::visit
+    // so the compiler enforces every phase is handled.  Replaces the old
+    // m_HandshakeFinished bool.
+    // ─────────────────────────────────────────────────────────────────────────────
+    struct Handshaking {};
+    struct Connected   {};
 
-    // §5.5 Opinionated API — no "reliable" flag.
-    void Send(ByteSpan buf);
+    using ConnectionPhase = std::variant<Handshaking, Connected>;
 
-    void OnDataReceived      (DataReceivedCallback fn);
-    void OnServerConnected   (ServerConnectedCallback fn);
-    void OnServerDisconnected(ServerDisconnectedCallback fn);
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Init resources bundle for the monadic pipeline.
+    // ─────────────────────────────────────────────────────────────────────────────
+    struct ParsedAddress {
+        std::string Host;
+        uint16_t    Port = 0;
+    };
 
-private:
-    // ── §3.2 + §5.5: Pure-ish init helpers, composed via and_then ───────────
-    [[nodiscard]] static std::expected<ParsedAddress, ClientError>
-        ParseAddress(std::string_view address);
+    struct ClientResources {
+        int         Socket;
+        WolfContext  Ctx;
+        WolfSession  SSL;
+    };
 
-    [[nodiscard]] static std::expected<std::string, ClientError>
-        ResolveHost(const std::string& host);
+    struct PendingClientSend {
+        std::vector<uint8_t> Data;
+    };
 
-    [[nodiscard]] static std::expected<int, ClientError>
-        CreateAndConnectSocket(const std::string& ip, uint16_t port);
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Client
+    // ─────────────────────────────────────────────────────────────────────────────
+    class Client {
+    public:
+        using DataReceivedCallback       = std::function<void(ByteSpan)>;
+        using ServerConnectedCallback    = std::function<void()>;
+        using ServerDisconnectedCallback = std::function<void()>;
 
-    [[nodiscard]] std::expected<WolfContext, ClientError>
-        CreateTLSContext() const;
+        Client()  = default;
+        ~Client();
 
-    [[nodiscard]] std::expected<WolfSession, ClientError>
-        CreateSession(WOLFSSL_CTX* ctx, int socket) const;
+        Client(const Client&)            = delete;
+        Client& operator=(const Client&) = delete;
 
-    /// The full monadic init pipeline.
-    [[nodiscard]] std::expected<ClientResources, ClientError>
-        InitNetwork(std::string_view address) const;
+        /// address = "ip:port" or "hostname:port"
+        void ConnectToServer(std::string_view address);
 
-    // ── Network loop ────────────────────────────────────────────────────────
-    void NetworkThreadFunc();
+        /// Full disconnect — blocks until the network thread exits.
+        /// Call from outside the network thread (UI, app shutdown).
+        void Disconnect();
 
-    // §3.4 Typestate dispatch
-    void DriveHandshake();
-    void DriveConnected();
-    void DrainSendQueue();
-    void DoSend(ByteSpan buf);
+        /// Signal the network thread to stop and disconnect gracefully.
+        /// The network thread will send close_notify before shutting down,
+        /// so the server knows the client left (critical for DTLS/UDP where
+        /// there is no TCP FIN).
+        void RequestDisconnect() noexcept {
+            m_Running.store(false, std::memory_order_release);
+        }
 
-    void OnFatalError(std::string_view msg);
+        [[nodiscard]] bool IsConnected() const noexcept {
+            return m_ConnectionStatus.load(std::memory_order_acquire)
+                   == ConnectionStatus::Connected;
+        }
+        [[nodiscard]] ConnectionStatus GetConnectionStatus() const noexcept {
+            return m_ConnectionStatus.load(std::memory_order_acquire);
+        }
+        [[nodiscard]] std::string GetConnectionDebugMessage() const {
+            std::lock_guard lock(m_StateMutex);
+            return m_ConnectionDebugMessage;
+        }
 
-    // wolfSSL custom I/O (static, C-linkage-compatible)
-    static int IOSend(WOLFSSL*, char* buf, int sz, void* ctx);
-    static int IORecv(WOLFSSL*, char* buf, int sz, void* ctx);
+        void Send(ByteSpan buf);
 
-    // ── Constants ────────────────────────────────────────────────────────────
-    static constexpr int kDtlsMtu = 1400;
+        void OnDataReceived      (DataReceivedCallback fn);
+        void OnServerConnected   (ServerConnectedCallback fn);
+        void OnServerDisconnected(ServerDisconnectedCallback fn);
 
-    // ── State ────────────────────────────────────────────────────────────────
-    std::string m_ServerAddress;
+    private:
+        // ── Pure-ish init helpers, composed via and_then ──
+        [[nodiscard]] static std::expected<ParsedAddress, ClientError>
+            ParseAddress(std::string_view address);
 
-    int               m_Socket = -1;
-    std::atomic<bool> m_Running { false };
-    NetworkExecutor   m_NetworkExecutor;
+        [[nodiscard]] static std::expected<std::string, ClientError>
+            ResolveHost(const std::string& host);
 
-    std::atomic<ConnectionStatus> m_ConnectionStatus { ConnectionStatus::Disconnected };
-    std::string                   m_ConnectionDebugMessage;
-    mutable std::mutex            m_StateMutex;
+        [[nodiscard]] static std::expected<int, ClientError>
+            CreateAndConnectSocket(const std::string& ip, uint16_t port);
 
-    WolfContext  m_Ctx;
-    WolfSession  m_SSL;
+        [[nodiscard]] std::expected<WolfContext, ClientError>
+            CreateTLSContext() const;
 
-    // §3.4 — replaces the old bool m_HandshakeFinished.
-    ConnectionPhase m_Phase { Handshaking{} };
+        [[nodiscard]] std::expected<WolfSession, ClientError>
+            CreateSession(WOLFSSL_CTX* ctx, int socket) const;
 
-    std::atomic<bool> m_SuppressShutdown { false };
+        /// The full monadic init pipeline.
+        [[nodiscard]] std::expected<ClientResources, ClientError>
+            InitNetwork(std::string_view address) const;
 
-    std::vector<uint8_t> m_IncomingEncryptedBuffer;
-    mutable std::mutex              m_SendMutex;
-    std::vector<PendingClientSend>  m_SendQueue;
+        // ── Network loop ──
+        void NetworkThreadFunc();
 
-    DataReceivedCallback       m_OnDataReceived;
-    ServerConnectedCallback    m_OnServerConnected;
-    ServerDisconnectedCallback m_OnServerDisconnected;
-};
+        // Typestate dispatch
+        void DriveHandshake();
+        void DriveConnected();
+        void DrainSendQueue();
+        void DoSend(ByteSpan buf);
+
+        void OnFatalError(std::string_view msg);
+
+        // wolfSSL custom I/O (static, C-linkage-compatible)
+        static int IOSend(WOLFSSL*, char* buf, int sz, void* ctx);
+        static int IORecv(WOLFSSL*, char* buf, int sz, void* ctx);
+
+        // ── Constants ──
+        static constexpr int kDtlsMtu = 1400;
+
+        // ── State ──
+        std::string m_ServerAddress;
+
+        int               m_Socket = -1;
+        std::atomic<bool> m_Running { false };
+        NetworkExecutor   m_NetworkExecutor;
+
+        std::atomic<ConnectionStatus> m_ConnectionStatus { ConnectionStatus::Disconnected };
+        std::string                   m_ConnectionDebugMessage;
+        mutable std::mutex            m_StateMutex;
+
+        WolfContext  m_Ctx;
+        WolfSession  m_SSL;
+
+        ConnectionPhase m_Phase { Handshaking{} };
+
+        std::atomic<bool> m_SuppressShutdown { false };
+
+        std::vector<uint8_t> m_IncomingEncryptedBuffer;
+        mutable std::mutex              m_SendMutex;
+        std::vector<PendingClientSend>  m_SendQueue;
+
+        DataReceivedCallback       m_OnDataReceived;
+        ServerConnectedCallback    m_OnServerConnected;
+        ServerDisconnectedCallback m_OnServerDisconnected;
+    };
 
 } // namespace Safira
 #endif // PQC_MASTER_THESIS_2026_CLIENT_H

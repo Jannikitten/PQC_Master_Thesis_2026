@@ -1,20 +1,6 @@
 #ifndef PQC_MASTER_THESIS_2026_WOLFTYPES_H
 #define PQC_MASTER_THESIS_2026_WOLFTYPES_H
 
-// ═════════════════════════════════════════════════════════════════════════════
-// WolfTypes.h — RAII wrappers for wolfSSL objects
-//
-// §5.5 — Managing secret lifetimes  (Slides 222-224)
-//
-//   "We want to minimise the lifetime of secrets in memory."
-//   "Rust: Drop handler can automatically erase memory."
-//
-// C++ equivalent: unique_ptr with a custom deleter.  WolfSession's deleter
-// calls wolfSSL_free which internally zeroises session keys.
-//
-// Shared between Server.h and Client.h so neither depends on the other.
-// ═════════════════════════════════════════════════════════════════════════════
-
 #include <memory>
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>

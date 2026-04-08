@@ -2,8 +2,6 @@
 #define SAFIRA_APPLICATION_CLIENT_CLIENTSTATE_H
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ClientState.h — Immutable client-side application state
-//
 // Single source of truth for everything the client knows.  The UI reads
 // from this; the reducer produces new versions of it.
 //
@@ -23,46 +21,46 @@
 
 namespace Safira {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// IncomingInvite — a pending private-chat invitation
-// ─────────────────────────────────────────────────────────────────────────────
-struct IncomingInvite {
-    std::string FromUsername;
-};
+    // ─────────────────────────────────────────────────────────────────────────────
+    // IncomingInvite — a pending private-chat invitation
+    // ─────────────────────────────────────────────────────────────────────────────
+    struct IncomingInvite {
+        std::string FromUsername;
+    };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ClientState
-// ─────────────────────────────────────────────────────────────────────────────
-struct ClientState {
-    // ── Connection ──────────────────────────────────────────────────────
-    ConnectionStatus Status = ConnectionStatus::Disconnected;
-    std::string      ServerAddress  = "127.0.0.1";
-    std::string      Username;
-    uint32_t         Color = 0xFFFFFFFF;
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ClientState
+    // ─────────────────────────────────────────────────────────────────────────────
+    struct ClientState {
+        // ── Connection ──────────────────────────────────────────────────────
+        ConnectionStatus Status = ConnectionStatus::Disconnected;
+        std::string      ServerAddress  = "127.0.0.1";
+        std::string      Username;
+        uint32_t         Color = 0xFFFFFFFF;
 
-    // ── Own avatar (processed bytes for the wire) ───────────────────────
-    std::vector<uint8_t> AvatarBytes;
+        // ── Own avatar (processed bytes for the wire) ──
+        std::vector<uint8_t> AvatarBytes;
 
-    // ── Connected peer list ─────────────────────────────────────────────
-    std::map<std::string, UserInfo> ConnectedClients;
+        // ── Connected peer list ──
+        std::map<std::string, UserInfo> ConnectedClients;
 
-    // ── Lobby chat messages ─────────────────────────────────────────────
-    std::vector<ChatMessage> LobbyMessages;
+        // ── Lobby chat messages ──
+        std::vector<ChatMessage> LobbyMessages;
 
-    // ── Private chat state ──────────────────────────────────────────────
-    std::vector<IncomingInvite>  IncomingInvites;
-    std::set<std::string>        PendingOutgoingInvites;
-    std::set<std::string>        ActivePrivateChats;
+        // ── Private chat state ──
+        std::vector<IncomingInvite>  IncomingInvites;
+        std::set<std::string>        PendingOutgoingInvites;
+        std::set<std::string>        ActivePrivateChats;
 
-    // ── Message history (received from server on connect) ───────────────
-    std::vector<ChatMessage> MessageHistory;
+        // ── Message history (received from server on connect) ──
+        std::vector<ChatMessage> MessageHistory;
 
-    // ── Server-assigned MOTD ────────────────────────────────────────────
-    std::string Motd;
+        // ── Server-assigned MOTD ──
+        std::string Motd;
 
-    // ── Kick reason (if we were kicked) ─────────────────────────────────
-    std::string KickReason;
-};
+        // ── Kick reason (if we were kicked) ──
+        std::string KickReason;
+    };
 
 } // namespace Safira
 

@@ -2,8 +2,6 @@
 #define SAFIRA_APPLICATION_CLIENT_CLIENTWIRING_H
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ClientWiring.h — Factory for the fully wired client store
-//
 // Assembles the Store with the complete middleware stack:
 //   1. Deserialize middleware  — DataReceived → typed actions
 //   2. Effect middleware       — runs effects (network + logging)
@@ -27,32 +25,32 @@
 
 namespace Safira {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CreateClientStore — builds the client store with all middleware installed
-//
-// Middleware execution order (for each Dispatch):
-//   Deserialize → Effect → Logging → ApplyReducer
-// ─────────────────────────────────────────────────────────────────────────────
-[[nodiscard]] inline auto CreateClientStore(
-    ClientState initialState,
-    Middleware::ClientEffectHandler effectHandler)
-{
-    auto store = std::make_unique<Store<ClientState, ClientActionVariant>>(
-        std::move(initialState), ClientReducerFn);
+    // ─────────────────────────────────────────────────────────────────────────────
+    // CreateClientStore — builds the client store with all middleware installed
+    //
+    // Middleware execution order (for each Dispatch):
+    //   Deserialize → Effect → Logging → ApplyReducer
+    // ─────────────────────────────────────────────────────────────────────────────
+    [[nodiscard]] inline auto CreateClientStore(
+        ClientState initialState,
+        Middleware::ClientEffectHandler effectHandler)
+    {
+        auto store = std::make_unique<Store<ClientState, ClientActionVariant>>(
+            std::move(initialState), ClientReducerFn);
 
-    // 1. Deserialize — outermost, converts raw DataReceived to typed actions
-    store->AddMiddleware(Middleware::MakeClientDeserializeMiddleware());
+        // Deserialize — outermost, converts raw DataReceived to typed actions
+        store->AddMiddleware(Middleware::MakeClientDeserializeMiddleware());
 
-    // 2. Effect — computes and executes effects
-    store->AddMiddleware(
-        Middleware::MakeClientEffectMiddleware(std::move(effectHandler)));
+        // Effect — computes and executes effects
+        store->AddMiddleware(
+            Middleware::MakeClientEffectMiddleware(std::move(effectHandler)));
 
-    // 3. Logging — innermost middleware, logs action dispatch
-    store->AddMiddleware(
-        Middleware::MakeLoggingMiddleware<ClientState, ClientActionVariant>("Client"));
+        // Logging — innermost middleware, logs action dispatch
+        store->AddMiddleware(
+            Middleware::MakeLoggingMiddleware<ClientState, ClientActionVariant>("Client"));
 
-    return store;
-}
+        return store;
+    }
 
 } // namespace Safira
 

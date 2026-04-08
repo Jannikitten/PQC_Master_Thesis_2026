@@ -1,13 +1,11 @@
 #ifndef PQC_MASTER_THESIS_2026_CONNECTIONVIEW_H
 #define PQC_MASTER_THESIS_2026_CONNECTIONVIEW_H
 
-// =============================================================================
-// ConnectionView.h -- Connection modal + crop modal
-//
+// ═══════════════════════════════════════════════════════════════════════════════
 // Pure view component following the ChatPanel pattern:
 //   - Receives data as parameters (no Store dependency)
 //   - Communicates back to the layer via callbacks
-// =============================================================================
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #include "AvatarCircle.h" // CropRect, DrawCropWidget
 #include "Theme.h"

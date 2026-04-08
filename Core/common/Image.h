@@ -43,7 +43,7 @@ namespace Safira {
         VkBuffer m_StagingBuffer = nullptr;
         VkDeviceMemory m_StagingBufferMemory = nullptr;
 
-        size_t m_AlignedSize = 0;
+        std::size_t m_AlignedSize = 0;
 
         VkDescriptorSet m_DescriptorSet = nullptr;
 

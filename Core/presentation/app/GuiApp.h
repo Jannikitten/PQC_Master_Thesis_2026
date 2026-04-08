@@ -21,119 +21,119 @@ struct GLFWwindow;
 
 namespace Safira {
 
-struct ApplicationSpecification {
-    std::string           name             = "Safira Chat";
-    uint32_t              width            = 1600;
-    uint32_t              height           = 900;
-    std::filesystem::path IconPath;
-    bool                  WindowResizeable = true;
-    bool                  CustomTitlebar   = false;
-    bool                  CenterWindow     = false;
-};
+    struct ApplicationSpecification {
+        std::string           name             = "Safira Chat";
+        uint32_t              width            = 1600;
+        uint32_t              height           = 900;
+        std::filesystem::path IconPath;
+        bool                  WindowResizeable = true;
+        bool                  CustomTitlebar   = false;
+        bool                  CenterWindow     = false;
+    };
 
-class ApplicationGUI {
-public:
-    explicit ApplicationGUI(const ApplicationSpecification& spec = ApplicationSpecification());
-    ~ApplicationGUI();
+    class ApplicationGUI {
+    public:
+        explicit ApplicationGUI(const ApplicationSpecification& spec = ApplicationSpecification());
+        ~ApplicationGUI();
 
-    ApplicationGUI(const ApplicationGUI&)            = delete;
-    ApplicationGUI& operator=(const ApplicationGUI&) = delete;
+        ApplicationGUI(const ApplicationGUI&)            = delete;
+        ApplicationGUI& operator=(const ApplicationGUI&) = delete;
 
-    static ApplicationGUI& Get();
+        static ApplicationGUI& Get();
 
-    void Run();
-    void Close();
+        void Run();
+        void Close();
 
-    void SetMenubarCallback(std::function<void()> fn) { m_MenubarCallback = std::move(fn); }
+        void SetMenubarCallback(std::function<void()> fn) { m_MenubarCallback = std::move(fn); }
 
-    template <typename T>
-    void PushLayer() {
-        static_assert(std::is_base_of_v<Layer, T>, "Pushed type is not subclass of Layer!");
-        m_LayerStack.emplace_back(std::make_shared<T>())->OnAttach();
-    }
+        template <typename T>
+        void PushLayer() {
+            static_assert(std::is_base_of_v<Layer, T>, "Pushed type is not subclass of Layer!");
+            m_LayerStack.emplace_back(std::make_shared<T>())->OnAttach();
+        }
 
-    void PushLayer(const std::shared_ptr<Layer>& layer) {
-        m_LayerStack.emplace_back(layer);
-        layer->OnAttach();
-    }
+        void PushLayer(const std::shared_ptr<Layer>& layer) {
+            m_LayerStack.emplace_back(layer);
+            layer->OnAttach();
+        }
 
-    [[nodiscard]] bool                    IsMaximized()        const;
-    [[nodiscard]] float                   GetTime();
-    [[nodiscard]] GLFWwindow*             GetWindowHandle()    const { return m_WindowHandle; }
-    [[nodiscard]] bool                    IsTitleBarHovered()  const { return m_TitleBarHovered; }
-    [[nodiscard]] bool                    IsChatPanelVisible() const { return m_ChatPanelVisible; }
+        [[nodiscard]] bool                    IsMaximized()        const;
+        [[nodiscard]] float                   GetTime();
+        [[nodiscard]] GLFWwindow*             GetWindowHandle()    const { return m_WindowHandle; }
+        [[nodiscard]] bool                    IsTitleBarHovered()  const { return m_TitleBarHovered; }
+        [[nodiscard]] bool                    IsChatPanelVisible() const { return m_ChatPanelVisible; }
 
-    static VkInstance       GetInstance();
-    static VkPhysicalDevice GetPhysicalDevice();
-    static VkDevice         GetDevice();
+        static VkInstance       GetInstance();
+        static VkPhysicalDevice GetPhysicalDevice();
+        static VkDevice         GetDevice();
 
-    static VkCommandBuffer  GetCommandBuffer(bool begin);
-    static void             FlushCommandBuffer(VkCommandBuffer commandBuffer);
+        static VkCommandBuffer  GetCommandBuffer(bool begin);
+        static void             FlushCommandBuffer(VkCommandBuffer commandBuffer);
 
-    static void    SubmitResourceFree(std::function<void()>&& func);
-    static ImFont* GetFont(std::string_view name);
+        static void    SubmitResourceFree(std::function<void()>&& func);
+        static ImFont* GetFont(std::string_view name);
 
-    /// Thread-safe: can be called from network threads, GLFW callbacks, etc.
-    template <typename Func>
-    void QueueEvent(Func&& func) {
-        std::scoped_lock lock(m_EventQueueMutex);
-        m_EventQueue.push(std::forward<Func>(func));
-    }
+        /// Thread-safe: can be called from network threads, GLFW callbacks, etc.
+        template <typename Func>
+        void QueueEvent(Func&& func) {
+            std::scoped_lock lock(m_EventQueueMutex);
+            m_EventQueue.push(std::forward<Func>(func));
+        }
 
-    std::string m_TitlebarUserName;
-    bool        m_TitlebarUserOnline = false;
-    ImTextureID m_TitlebarAvatarTex = {};
-    bool  m_TitlebarConnected  = false;
-    bool  m_UserManualAway     = false;
-    float m_AfkTimeoutSeconds  = 300.0f;  // 5 minutes default
-    std::chrono::steady_clock::time_point m_LastActivityTime
-        = std::chrono::steady_clock::now();
-    std::function<void()> m_OnLogout;
+        std::string m_TitlebarUserName;
+        bool        m_TitlebarUserOnline = false;
+        ImTextureID m_TitlebarAvatarTex = {};
+        bool  m_TitlebarConnected  = false;
+        bool  m_UserManualAway     = false;
+        float m_AfkTimeoutSeconds  = 300.0f;  // 5 minutes default
+        std::chrono::steady_clock::time_point m_LastActivityTime
+            = std::chrono::steady_clock::now();
+        std::function<void()> m_OnLogout;
 
-    // ── Titlebar cached state (set by UI_DrawTitlebar, used by UI_DrawTitlebarButtons)
-    ImVec2 m_CachedTbMin  = {};
-    ImVec2 m_CachedTbMax  = {};
-    float  m_CachedTbCenterY = 0.0f;
-    float  m_CachedDotCx  = 0.0f;     // status dot center X (screen)
-    float  m_CachedDotCy  = 0.0f;     // status dot center Y (screen)
-    bool   m_CachedShowDot = false;
+        // ── Titlebar cached state (set by UI_DrawTitlebar, used by UI_DrawTitlebarButtons)
+        ImVec2 m_CachedTbMin  = {};
+        ImVec2 m_CachedTbMax  = {};
+        float  m_CachedTbCenterY = 0.0f;
+        float  m_CachedDotCx  = 0.0f;     // status dot center X (screen)
+        float  m_CachedDotCy  = 0.0f;     // status dot center Y (screen)
+        bool   m_CachedShowDot = false;
 
-private:
-    void Init();
-    void Shutdown();
+    private:
+        void Init();
+        void Shutdown();
 
-    void UI_DrawTitlebar(float& outTitlebarHeight);
-    void UI_DrawTitlebarButtons();
-    void UI_DrawMenubar();
-    void DrawFadedLogo();
+        void UI_DrawTitlebar(float& outTitlebarHeight);
+        void UI_DrawTitlebarButtons();
+        void UI_DrawMenubar();
+        void DrawFadedLogo();
 
-    /// Decode an embedded PNG byte array into a GPU-uploaded Image.
-    static std::shared_ptr<Image> LoadEmbeddedIcon(const unsigned char* data, std::size_t size);
+        /// Decode an embedded PNG byte array into a GPU-uploaded Image.
+        static std::shared_ptr<Image> LoadEmbeddedIcon(const unsigned char* data, std::size_t size);
 
-    void Spring(float weight, float spacing);
-    void Spring();
+        void Spring(float weight, float spacing);
+        void Spring();
 
-    // ── State ────────────────────────────────────────────────────────────────
-    ApplicationSpecification m_Specification;
-    GLFWwindow*              m_WindowHandle = nullptr;
-    bool                     m_Running      = false;
+        // ── State ────────────────────────────────────────────────────────────────
+        ApplicationSpecification m_Specification;
+        GLFWwindow*              m_WindowHandle = nullptr;
+        bool                     m_Running      = false;
 
-    float m_TimeStep      = 0.0f;
-    float m_FrameTime     = 0.0f;
-    float m_LastFrameTime = 0.0f;
+        float m_TimeStep      = 0.0f;
+        float m_FrameTime     = 0.0f;
+        float m_LastFrameTime = 0.0f;
 
-    bool m_TitleBarHovered = false;
-    bool m_ChatPanelVisible = true;
+        bool m_TitleBarHovered = false;
+        bool m_ChatPanelVisible = true;
 
-    std::vector<std::shared_ptr<Layer>> m_LayerStack;
-    std::function<void()>               m_MenubarCallback;
+        std::vector<std::shared_ptr<Layer>> m_LayerStack;
+        std::function<void()>               m_MenubarCallback;
 
-    std::mutex                         m_EventQueueMutex;
-    std::queue<std::function<void()>>  m_EventQueue;
-};
+        std::mutex                         m_EventQueueMutex;
+        std::queue<std::function<void()>>  m_EventQueue;
+    };
 
-/// Implemented by the application (Client or Server).
-std::unique_ptr<ApplicationGUI> CreateApplication(int argc, char** argv);
+    /// Implemented by the application (Client or Server).
+    std::unique_ptr<ApplicationGUI> CreateApplication(int argc, char** argv);
 
 } // namespace Safira
 

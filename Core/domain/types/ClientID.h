@@ -2,12 +2,6 @@
 #define SAFIRA_DOMAIN_TYPES_CLIENTID_H
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Common.h — project-wide types
-//
-// §3.4 — Strong Types  (Slides 98-104)
-//
-//   "Strong type avoids mixing up different keys."
-//
 // ClientID is a distinct type, not a bare uint64_t.  The compiler rejects
 // any attempt to silently mix it with a port, fd, byte count, or other
 // integer — exactly the property the notes motivate for cryptographic keys.

@@ -18,23 +18,23 @@
 
 namespace Safira {
 
-class YamlMessageStore {
-public:
-    explicit YamlMessageStore(std::filesystem::path filepath,
-                              size_t maxMessages = 5000)
-        : m_FilePath(std::move(filepath))
-        , m_MaxMessages(maxMessages) {}
+    class YamlMessageStore {
+    public:
+        explicit YamlMessageStore(std::filesystem::path filepath,
+                                  std::size_t maxMessages = 5000)
+            : m_FilePath(std::move(filepath))
+            , m_MaxMessages(maxMessages) {}
 
-    [[nodiscard]] bool Save(const std::vector<ChatMessage>& messages);
-    [[nodiscard]] std::expected<std::vector<ChatMessage>, std::string> Load();
+        [[nodiscard]] bool Save(const std::vector<ChatMessage>& messages);
+        [[nodiscard]] std::expected<std::vector<ChatMessage>, std::string> Load();
 
-private:
-    std::filesystem::path m_FilePath;
-    size_t                m_MaxMessages;
-};
+    private:
+        std::filesystem::path m_FilePath;
+        std::size_t                m_MaxMessages;
+    };
 
-// Verify concept satisfaction
-static_assert(MessageStore<YamlMessageStore>);
+    // Verify concept satisfaction
+    static_assert(MessageStore<YamlMessageStore>);
 
 } // namespace Safira
 

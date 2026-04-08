@@ -45,28 +45,28 @@ public:
     void Quit();
 
 private:
-    // ── Console command handling ────────────────────────────────────────────
+    // ── Console command handling ──
     void OnCommand(std::string_view command);
     void SendChatMessage(std::string_view message);
 
-    // ── Thread-safe event queue ────────────────────────────────────────────
+    // ── Thread-safe event queue ──
     void EnqueueEvent(std::function<void()>&& fn);
     void DrainQueuedEvents();
 
-    // ── Persistence ────────────────────────────────────────────────────────
+    // ── Persistence ──
     void SaveMessageHistory(const std::vector<Safira::ChatMessage>& history);
     void LoadMessageHistory();
 
-    // ── Infrastructure ─────────────────────────────────────────────────────
+    // ── Infrastructure ──
     std::unique_ptr<Safira::Server> m_Server;
     Console                         m_Console;
     std::filesystem::path           m_MessageHistoryFilePath;
 
-    // ── Store (single source of truth) ─────────────────────────────────────
+    // ── Store (single source of truth) ──
     std::unique_ptr<Safira::Store<Safira::ServerState, Safira::ServerAction>>
         m_Store;
 
-    // ── Event queue (cross-thread safety) ──────────────────────────────────
+    // ── Event queue (cross-thread safety) ──
     std::mutex                       m_EventMutex;
     std::queue<std::function<void()>> m_PendingEvents;
 };

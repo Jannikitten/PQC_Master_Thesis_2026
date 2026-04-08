@@ -9,12 +9,10 @@
 namespace Safira {
     namespace Utils {
 
-		static uint32_t GetVulkanMemoryType(VkMemoryPropertyFlags properties, uint32_t type_bits)
-		{
+		static uint32_t GetVulkanMemoryType(VkMemoryPropertyFlags properties, uint32_t type_bits) {
 			VkPhysicalDeviceMemoryProperties prop;
 			vkGetPhysicalDeviceMemoryProperties(ApplicationGUI::GetPhysicalDevice(), &prop);
-			for (uint32_t i = 0; i < prop.memoryTypeCount; i++)
-			{
+			for (uint32_t i = 0; i < prop.memoryTypeCount; i++) {
 				if ((prop.memoryTypes[i].propertyFlags & properties) == properties && type_bits & (1 << i))
 					return i;
 			}
@@ -22,20 +20,16 @@ namespace Safira {
 			return 0xffffffff;
 		}
 
-		static uint32_t BytesPerPixel(ImageFormat format)
-		{
-			switch (format)
-			{
+		static uint32_t BytesPerPixel(ImageFormat format) {
+			switch (format) {
 				case ImageFormat::RGBA:    return 4;
 				case ImageFormat::RGBA32F: return 16;
 			}
 			return 0;
 		}
 
-		static VkFormat WalnutFormatToVulkanFormat(ImageFormat format)
-		{
-			switch (format)
-			{
+		static VkFormat WalnutFormatToVulkanFormat(ImageFormat format) {
+			switch (format) {
 				case ImageFormat::RGBA:    return VK_FORMAT_R8G8B8A8_UNORM;
 				case ImageFormat::RGBA32F: return VK_FORMAT_R32G32B32A32_SFLOAT;
 			}
@@ -45,8 +39,7 @@ namespace Safira {
 	}
 
 	Image::Image(std::string_view path)
-		: m_Filepath(path)
-	{
+		: m_Filepath(path) {
 		int width, height, channels;
 		uint8_t* data = nullptr;
 
@@ -70,20 +63,17 @@ namespace Safira {
 	}
 
 	Image::Image(uint32_t width, uint32_t height, ImageFormat format, const void* data)
-		: m_Width(width), m_Height(height), m_Format(format)
-	{
+		: m_Width(width), m_Height(height), m_Format(format) {
 		AllocateMemory(m_Width * m_Height * Utils::BytesPerPixel(m_Format));
 		if (data)
 			SetData(data);
 	}
 
-	Image::~Image()
-	{
+	Image::~Image() {
 		Release();
 	}
 
-	void Image::AllocateMemory(uint64_t size)
-	{
+	void Image::AllocateMemory(uint64_t size) {
 		VkDevice device = ApplicationGUI::GetDevice();
 
 		VkResult err;
@@ -155,8 +145,7 @@ namespace Safira {
 		m_DescriptorSet = (VkDescriptorSet)ImGui_ImplVulkan_AddTexture(m_Sampler, m_ImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	void Image::Release()
-	{
+	void Image::Release() {
 		ApplicationGUI::SubmitResourceFree([descriptorSet = m_DescriptorSet, sampler = m_Sampler, imageView = m_ImageView, image = m_Image,
 			memory = m_Memory, stagingBuffer = m_StagingBuffer, stagingBufferMemory = m_StagingBufferMemory]()
 		{
@@ -181,16 +170,14 @@ namespace Safira {
 		m_DescriptorSet = nullptr;
 	}
 
-	void Image::SetData(const void* data)
-	{
+	void Image::SetData(const void* data) {
 		VkDevice device = ApplicationGUI::GetDevice();
 
-		size_t upload_size = m_Width * m_Height * Utils::BytesPerPixel(m_Format);
+		std::size_t upload_size = m_Width * m_Height * Utils::BytesPerPixel(m_Format);
 
 		VkResult err;
 
-		if (!m_StagingBuffer)
-		{
+		if (!m_StagingBuffer) {
 			// Create the Upload Buffer
 			{
 				VkBufferCreateInfo buffer_info = {};
@@ -217,7 +204,7 @@ namespace Safira {
 
 		// Upload to Buffer
 		{
-			char* map = NULL;
+			char* map = nullptr;
 			err = vkMapMemory(device, m_StagingBufferMemory, 0, m_AlignedSize, 0, (void**)(&map));
 			check_vk_result(err);
 			memcpy(map, data, upload_size);
@@ -274,8 +261,7 @@ namespace Safira {
 		}
 	}
 
-	void Image::Resize(uint32_t width, uint32_t height)
-	{
+	void Image::Resize(uint32_t width, uint32_t height) {
 		if (m_Image && m_Width == width && m_Height == height)
 			return;
 
