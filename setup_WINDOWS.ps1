@@ -118,5 +118,3 @@ cmake .. -G "Ninja" `
     -DOPENSSL_ROOT_DIR="$opensslRoot"
 
 cmake --build . --parallel $Jobs
-
-Write-Ok "Build Successful!."
