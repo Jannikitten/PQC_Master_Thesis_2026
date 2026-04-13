@@ -119,4 +119,4 @@ cmake .. -G "Ninja" `
 
 cmake --build . --parallel $Jobs
 
-Write-Ok "Build Successful!"
+Write-Ok "Build Successful!."
