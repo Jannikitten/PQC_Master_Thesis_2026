@@ -92,8 +92,11 @@ install_macos() {
     info "Updating Homebrew…"
     brew update
 
+    # NOTE: use ${pkg} (with braces) rather than $pkg before the Unicode
+    # ellipsis. Some locales let bash treat the following non-ASCII bytes as
+    # part of the identifier, which then trips `set -u` with "pkg…: unbound".
     for pkg in cmake python3 openssl ninja; do
-        brew list "$pkg" &>/dev/null && success "$pkg already installed" || { info "Installing $pkg…"; brew install "$pkg"; }
+        brew list "$pkg" &>/dev/null && success "${pkg} already installed" || { info "Installing ${pkg}..."; brew install "$pkg"; }
     done
 
     # Vulkan on macOS: install loader + headers via Homebrew formulae.
@@ -102,8 +105,8 @@ install_macos() {
     # (libvulkan.dylib, vulkan/vulkan.h) plus MoltenVK as the Metal ICD.
     for pkg in vulkan-headers vulkan-loader molten-vk glslang; do
         brew list "$pkg" &>/dev/null \
-            && success "$pkg already installed" \
-            || { info "Installing $pkg…"; brew install "$pkg"; }
+            && success "${pkg} already installed" \
+            || { info "Installing ${pkg}..."; brew install "$pkg"; }
     done
 
     _check_cmake_version

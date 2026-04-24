@@ -11,10 +11,7 @@
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/glm-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/spdlog-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/yaml-cpp-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/glm" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/imgui" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/spdlog" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/wolfssl" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/yaml-cpp" vcs="Git" />
   </component>
 </project>
