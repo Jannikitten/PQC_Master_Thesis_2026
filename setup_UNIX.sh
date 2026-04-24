@@ -119,6 +119,7 @@ install_debian() {
     sudo apt-get install -y \
         build-essential git cmake python3 python3-pip ninja-build pkg-config \
         libssl-dev \
+        libgl-dev \
         libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
         libwayland-dev libxkbcommon-dev
 
