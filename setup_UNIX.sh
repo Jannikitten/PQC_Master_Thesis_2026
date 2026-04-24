@@ -121,7 +121,14 @@ install_debian() {
         libssl-dev \
         libgl-dev \
         libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-        libwayland-dev libxkbcommon-dev
+        libwayland-dev libxkbcommon-dev \
+        gcc-14 g++-14
+
+    # The project uses C++23 library features such as <print> and <format>,
+    # which require libstdc++ from GCC 14. Ubuntu 24.04 defaults to GCC 13,
+    # so pin the compiler explicitly for the rest of this shell (Botan + CMake).
+    export CC=gcc-14
+    export CXX=g++-14
 
     # Vulkan from the stock Ubuntu repositories — simpler and more reliable
     # than mixing the LunarG repo, which frequently breaks apt-get on newer
