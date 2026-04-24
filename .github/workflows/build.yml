@@ -1,0 +1,106 @@
+# =============================================================================
+#  CI — run the setup_UNIX.sh / setup_WINDOWS.ps1 installers end-to-end on
+#  macOS, Ubuntu, and Windows. Verifies that participants' install path still
+#  works on each supported OS.
+# =============================================================================
+name: Build (Setup Scripts)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - ".gitignore"
+      - ".vscode/**"
+      - ".idea/**"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - ".gitignore"
+      - ".vscode/**"
+      - ".idea/**"
+  workflow_dispatch:
+
+# Cancel older runs for the same ref to conserve minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    env:
+      BUILD_TYPE: Release
+
+    steps:
+      # Checkout WITHOUT submodules — the whole point of CI is to verify that
+      # the setup scripts correctly initialise and fetch them themselves.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      # Cache the Botan install tree (biggest single cost in the build). Keyed
+      # on .gitmodules so a bumped Botan submodule revision invalidates it.
+      - name: Cache Botan install
+        uses: actions/cache@v4
+        with:
+          path: botan/install
+          key: botan-${{ matrix.os }}-${{ hashFiles('.gitmodules') }}-v1
+
+      # -----------------------------------------------------------------------
+      # Unix path (macOS + Ubuntu)
+      # -----------------------------------------------------------------------
+      - name: Run setup_UNIX.sh
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x ./setup_UNIX.sh
+          ./setup_UNIX.sh
+
+      # -----------------------------------------------------------------------
+      # Windows path
+      #   windows-latest already runs as an Administrator account, so the
+      #   script's elevation check passes without extra work.
+      # -----------------------------------------------------------------------
+      - name: Run setup_WINDOWS.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\setup_WINDOWS.ps1
+
+      # Sanity-check: the two executables exist after the build.
+      - name: Verify build artifacts (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          test -x build/SafiraClient || { echo "SafiraClient missing"; exit 1; }
+          test -x build/SafiraServer || { echo "SafiraServer missing"; exit 1; }
+          ls -la build/SafiraClient build/SafiraServer
+
+      - name: Verify build artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build\SafiraClient.exe)) { throw "SafiraClient.exe missing" }
+          if (-not (Test-Path build\SafiraServer.exe)) { throw "SafiraServer.exe missing" }
+          Get-ChildItem build\SafiraClient.exe, build\SafiraServer.exe
+
+      - name: Upload binaries
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safira-${{ matrix.os }}
+          path: |
+            build/SafiraClient*
+            build/SafiraServer*
+          if-no-files-found: error
+          retention-days: 7
