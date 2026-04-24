@@ -172,13 +172,11 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
+# glm / spdlog / yaml-cpp are pulled via CMake FetchContent, not submodules.
 $required = @(
     "imgui\imgui.h",
     "botan\configure.py",
-    "wolfssl\CMakeLists.txt",
-    "glm\CMakeLists.txt",
-    "spdlog\CMakeLists.txt",
-    "yaml-cpp\CMakeLists.txt"
+    "wolfssl\CMakeLists.txt"
 )
 foreach ($f in $required) {
     if (-not (Test-Path (Join-Path $ScriptDir $f))) {

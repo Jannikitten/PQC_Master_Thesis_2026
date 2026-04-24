@@ -196,13 +196,11 @@ if ! git submodule update --init --recursive --progress --no-recommend-shallow; 
 fi
 
 # Verify the submodules whose files are required by the build actually landed.
+# glm / spdlog / yaml-cpp are pulled via CMake FetchContent, not submodules.
 REQUIRED_FILES=(
     "imgui/imgui.h"
     "botan/configure.py"
     "wolfssl/CMakeLists.txt"
-    "glm/CMakeLists.txt"
-    "spdlog/CMakeLists.txt"
-    "yaml-cpp/CMakeLists.txt"
 )
 for f in "${REQUIRED_FILES[@]}"; do
     [[ -f "$f" ]] || error "Submodule file missing: $f (submodule init did not populate its parent). Try: git submodule update --init --recursive --force"

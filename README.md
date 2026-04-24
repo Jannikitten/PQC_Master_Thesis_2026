@@ -154,7 +154,7 @@ Step 1 ── Install system packages
           (CMake, compiler, Python, OpenSSL, Vulkan SDK, Ninja)
            │
 Step 2 ── Initialise git submodules
-          (wolfssl, botan, imgui, glfw, glm, spdlog, yaml-cpp)
+          (wolfssl, botan, imgui — glfw/glm/spdlog/yaml-cpp are fetched by CMake)
            │
 Step 3 ── Build Botan 3 from source
           python3 configure.py --enable-modules=ml_kem,ml_dsa
