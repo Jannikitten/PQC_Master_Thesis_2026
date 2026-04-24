@@ -179,12 +179,34 @@ header "Step 2 – Git submodules"
 
 cd "$SCRIPT_DIR"
 
-if [[ ! -d .git ]]; then
+# .git is a directory in a normal clone, a file in a git worktree.
+if [[ ! -e .git ]]; then
     error "This directory doesn't look like a git repository root. Clone the repo first."
 fi
 
 info "Initialising and updating all submodules…"
-git submodule update --init --recursive
+# --no-recommend-shallow disables the shallow=true hint from .gitmodules, which
+# can otherwise fail when the recorded commit is not at the tip of the branch
+# (a common cause of empty submodule directories).
+if ! git submodule update --init --recursive --progress --no-recommend-shallow; then
+    warn "Submodule update failed. Retrying once with deinit + init…"
+    git submodule deinit -f --all || true
+    git submodule update --init --recursive --progress --no-recommend-shallow \
+        || error "Failed to clone submodules. Check your internet connection and run: git submodule update --init --recursive --no-recommend-shallow"
+fi
+
+# Verify the submodules whose files are required by the build actually landed.
+REQUIRED_FILES=(
+    "imgui/imgui.h"
+    "botan/configure.py"
+    "wolfssl/CMakeLists.txt"
+    "glm/CMakeLists.txt"
+    "spdlog/CMakeLists.txt"
+    "yaml-cpp/CMakeLists.txt"
+)
+for f in "${REQUIRED_FILES[@]}"; do
+    [[ -f "$f" ]] || error "Submodule file missing: $f (submodule init did not populate its parent). Try: git submodule update --init --recursive --force"
+done
 success "Submodules ready"
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -208,10 +230,11 @@ else
     BOTAN_CC_FLAG=""
     [[ "$OS" == "macos" ]] && BOTAN_CC_FLAG="--cc=clang"
 
+    # NOTE: Botan 3 has no `--with-tls` flag — TLS is built in by default.
+    # `--enable-modules=…` explicitly pulls in ML-KEM and ML-DSA on top of defaults.
     # shellcheck disable=SC2086
     python3 configure.py \
         --prefix="${BOTAN_INSTALL}" \
-        --with-tls \
         --enable-modules=ml_kem,ml_dsa \
         ${BOTAN_CC_FLAG}
 

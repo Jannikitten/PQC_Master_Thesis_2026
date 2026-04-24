@@ -157,7 +157,7 @@ Step 2 ── Initialise git submodules
           (wolfssl, botan, imgui, glfw, glm, spdlog, yaml-cpp)
            │
 Step 3 ── Build Botan 3 from source
-          python3 configure.py --with-tls --enable-modules=ml_kem,ml_dsa
+          python3 configure.py --enable-modules=ml_kem,ml_dsa
           make && make install  →  botan/install/
            │
 Step 4 ── CMake configure

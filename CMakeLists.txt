@@ -82,7 +82,7 @@ if(NOT TARGET Botan::Botan)
                         "Cannot find Botan library under ${Botan_ROOT}/lib/\n"
                         "Build and install Botan from the submodule first:\n"
                         "  cd botan\n"
-                        "  python3 configure.py --prefix=./install --with-tls --with-ml-kem --with-ml-dsa\n"
+                        "  python3 configure.py --prefix=./install --enable-modules=ml_kem,ml_dsa\n"
                         "  make -j\$(nproc) && make install")
         endif()
 
@@ -140,9 +140,17 @@ add_library(CoreLib STATIC
         Core/infrastructure/serialization/PacketSerialize.cpp
 )
 
-# macOS: compile the Objective-C++ native window helper (once, outside the loop)
+# Platform-specific sources for the native window / file-dialog helpers.
 if(APPLE)
-        target_sources(CoreLib PRIVATE Core/infrastructure/platform/MacOSWindow.mm Core/infrastructure/platform/FileDialog.mm)
+        target_sources(CoreLib PRIVATE
+                Core/infrastructure/platform/MacOSWindow.mm
+                Core/infrastructure/platform/FileDialog.mm)
+elseif(WIN32)
+        target_sources(CoreLib PRIVATE
+                Core/infrastructure/platform/FileDialog_Windows.cpp)
+else()
+        target_sources(CoreLib PRIVATE
+                Core/infrastructure/platform/FileDialog_Linux.cpp)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +248,7 @@ foreach(TGT IN LISTS ALL_TARGETS)
                 )
         elseif(WIN32)
                 target_link_libraries(${TGT} PRIVATE
-                        User32.lib Gdi32.lib Shell32.lib ws2_32.lib
+                        User32.lib Gdi32.lib Shell32.lib ws2_32.lib Ole32.lib
                 )
         endif()
 endforeach()
