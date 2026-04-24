@@ -96,17 +96,15 @@ install_macos() {
         brew list "$pkg" &>/dev/null && success "$pkg already installed" || { info "Installing $pkg…"; brew install "$pkg"; }
     done
 
-    # Vulkan SDK via the official LunarG cask
-    if ! command -v glslc &>/dev/null && [[ -z "${VULKAN_SDK:-}" ]]; then
-        info "Installing Vulkan SDK (LunarG cask)…"
-        brew install --cask vulkan-sdk || {
-            warn "Cask install failed."
-            warn "Download the Vulkan SDK manually from https://vulkan.lunarg.com/sdk/home#mac"
-            warn "Then source the setup script: source \$VULKAN_SDK/setup-env.sh"
-        }
-    else
-        success "Vulkan SDK already available"
-    fi
+    # Vulkan on macOS: install loader + headers via Homebrew formulae.
+    # The LunarG 'vulkan-sdk' cask needs interactive sudo and frequently fails
+    # in CI; the formulae below give find_package(Vulkan) everything it needs
+    # (libvulkan.dylib, vulkan/vulkan.h) plus MoltenVK as the Metal ICD.
+    for pkg in vulkan-headers vulkan-loader molten-vk glslang; do
+        brew list "$pkg" &>/dev/null \
+            && success "$pkg already installed" \
+            || { info "Installing $pkg…"; brew install "$pkg"; }
+    done
 
     _check_cmake_version
 }
@@ -121,22 +119,15 @@ install_debian() {
         libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
         libwayland-dev libxkbcommon-dev
 
-    # Vulkan SDK from LunarG
-    if ! dpkg -l libvulkan-dev &>/dev/null 2>&1; then
-        info "Adding LunarG Vulkan SDK repository…"
-        . /etc/os-release
-        wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
-        # Try release-specific list first, fall back to jammy (works on most Ubuntu LTS)
-        LUNARG_LIST="https://packages.lunarg.com/vulkan/lunarg-vulkan-${VERSION_CODENAME}.list"
-        sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list "$LUNARG_LIST" 2>/dev/null \
-            || sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list \
-               "https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list"
-        sudo apt-get update -y
-        sudo apt-get install -y vulkan-sdk 2>/dev/null \
-            || sudo apt-get install -y libvulkan-dev vulkan-tools spirv-tools glslang-tools
+    # Vulkan from the stock Ubuntu repositories — simpler and more reliable
+    # than mixing the LunarG repo, which frequently breaks apt-get on newer
+    # Ubuntu codenames (e.g. noble) when only a jammy list is available.
+    if ! dpkg -s libvulkan-dev &>/dev/null; then
+        info "Installing Vulkan from the Ubuntu repositories…"
+        sudo apt-get install -y \
+            libvulkan-dev vulkan-tools glslang-tools spirv-tools
     else
-        success "Vulkan already installed"
+        success "libvulkan-dev already installed"
     fi
 
     _check_cmake_version
