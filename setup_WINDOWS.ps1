@@ -124,15 +124,27 @@ if (-not $hasVc) {
 }
 
 # Vulkan SDK ------------------------------------------------------------------
+# Prefer the Chocolatey package — it runs unattended and completes quickly
+# on CI. Fall back to LunarG's direct installer only if Chocolatey fails,
+# using `--confirm-command` so the Qt installer doesn't prompt and hang.
 if (-not (Get-Command glslc -ErrorAction SilentlyContinue) -and -not $env:VULKAN_SDK) {
-    Write-Info "Installing Vulkan SDK..."
-    $vInstaller = Join-Path $env:TEMP "VulkanSDK-Installer.exe"
-    Invoke-WebRequest `
-        -Uri "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe" `
-        -OutFile $vInstaller -UseBasicParsing
-    Start-Process -FilePath $vInstaller `
-        -ArgumentList "--accept-licenses", "--default-answer", "install" -Wait
+    Write-Info "Installing Vulkan SDK via Chocolatey..."
+    choco install vulkan-sdk -y --no-progress
     Update-Environment
+
+    if (-not (Get-Command glslc -ErrorAction SilentlyContinue) -and -not $env:VULKAN_SDK) {
+        Write-Warn2 "Chocolatey Vulkan install did not expose glslc — falling back to LunarG installer."
+        $vInstaller = Join-Path $env:TEMP "VulkanSDK-Installer.exe"
+        Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe" `
+            -OutFile $vInstaller -UseBasicParsing
+        Start-Process -FilePath $vInstaller `
+            -ArgumentList "--root", "C:\VulkanSDK\1.3.296.0", `
+                          "--accept-licenses", "--default-answer", `
+                          "--confirm-command", "install" `
+            -Wait
+        Update-Environment
+    }
 } else {
     Write-Ok "Vulkan SDK already available"
 }
