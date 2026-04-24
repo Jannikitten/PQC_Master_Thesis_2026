@@ -2,5 +2,7 @@ build*/
 docs*/
 .DS_Store
 .claude*/
+.idea*/
+.vscode*/
 ConnectionDetails.yaml
 MessageHistory.yaml
