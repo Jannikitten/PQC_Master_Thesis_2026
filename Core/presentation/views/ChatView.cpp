@@ -705,7 +705,11 @@ namespace Safira {
         auto now  = std::chrono::system_clock::now();
         auto time = std::chrono::system_clock::to_time_t(now);
         std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &time);
+#else
         localtime_r(&time, &local);
+#endif
         return std::format("{:02d}:{:02d}", local.tm_hour, local.tm_min);
     }
 
