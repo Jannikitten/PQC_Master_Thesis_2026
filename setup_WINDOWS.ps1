@@ -106,6 +106,38 @@ foreach ($p in $packages) {
     }
 }
 
+# The project requires CMake 4.1+. GitHub's Windows runner (and many user
+# machines) ship with CMake 3.x, which Chocolatey's "already installed"
+# check skips. Upgrade via pip — the `cmake` wheel on PyPI tracks the
+# official releases and ships a standalone binary.
+function Ensure-CMake4 {
+    $verLine = (& cmake --version 2>$null | Select-Object -First 1)
+    if (-not $verLine) { Die "CMake not found after install step." }
+    $ver = ($verLine -replace 'cmake version ','').Trim()
+    $major = [int]($ver.Split('.')[0])
+    if ($major -ge 4) {
+        Write-Ok "CMake $ver OK"
+        return
+    }
+    Write-Warn2 "CMake $ver found, but project requires >= 4.1. Upgrading via pip..."
+    python -m pip install --upgrade cmake
+    if ($LASTEXITCODE -ne 0) { Die "pip install cmake failed" }
+
+    # Prepend the pip-installed cmake's bin dir so the new version wins on PATH.
+    $pyBase = (& python -m site --user-base 2>$null).Trim()
+    if ($pyBase) { $env:PATH = (Join-Path $pyBase "Scripts") + ";" + $env:PATH }
+    $pyPrefix = (& python -c "import sys; print(sys.prefix)" 2>$null).Trim()
+    if ($pyPrefix) { $env:PATH = (Join-Path $pyPrefix "Scripts") + ";" + $env:PATH }
+
+    $verLine2 = (& cmake --version 2>$null | Select-Object -First 1)
+    $ver2 = ($verLine2 -replace 'cmake version ','').Trim()
+    if (-not $ver2 -or [int]($ver2.Split('.')[0]) -lt 4) {
+        Die "Failed to upgrade CMake to 4.1+. Got: $ver2"
+    }
+    Write-Ok "CMake upgraded -> $ver2"
+}
+Ensure-CMake4
+
 # Visual Studio Build Tools ---------------------------------------------------
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $hasVc = $false
