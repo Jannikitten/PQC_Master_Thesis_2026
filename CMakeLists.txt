@@ -247,6 +247,9 @@ foreach(TGT IN LISTS ALL_TARGETS)
                         "-framework UniformTypeIdentifiers"
                 )
         elseif(WIN32)
+                target_compile_definitions(${TGT} PRIVATE
+                        NOMINMAX WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS
+                )
                 target_link_libraries(${TGT} PRIVATE
                         User32.lib Gdi32.lib Shell32.lib ws2_32.lib Ole32.lib
                 )

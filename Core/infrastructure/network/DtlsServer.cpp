@@ -224,12 +224,10 @@ namespace Safira {
                      reinterpret_cast<const char*>(&yes), sizeof(yes));
         Safira::net::SetNonBlocking(sock);
 
-        const sockaddr_in local {
-            .sin_family = AF_INET,
-            .sin_port   = htons(m_Config.Port),
-            .sin_addr   = { .s_addr = INADDR_ANY },
-            .sin_zero   = {},
-        };
+        sockaddr_in local{};
+        local.sin_family      = AF_INET;
+        local.sin_port        = htons(m_Config.Port);
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (::bind(sock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) < 0) {
             Safira::net::CloseSocket(sock);

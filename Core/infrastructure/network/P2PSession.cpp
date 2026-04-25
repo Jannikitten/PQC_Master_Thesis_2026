@@ -75,12 +75,10 @@ namespace Safira {
         ::setsockopt(sock.Get(), SOL_SOCKET, SO_REUSEADDR,
                      reinterpret_cast<const char*>(&yes), sizeof(yes));
 
-        sockaddr_in local{
-            .sin_family = AF_INET,
-            .sin_port   = 0,
-            .sin_addr   = { .s_addr = INADDR_ANY },
-            .sin_zero   = {},
-        };
+        sockaddr_in local{};
+        local.sin_family      = AF_INET;
+        local.sin_port        = 0;
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (::bind(sock.Get(), reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0)
             return std::unexpected(P2PError::SocketBind);
