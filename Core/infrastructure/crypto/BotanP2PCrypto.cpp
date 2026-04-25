@@ -37,7 +37,9 @@
 #include <string>
 #include <unordered_map>
 
-#include <sys/stat.h>
+#ifndef _WIN32
+    #include <sys/stat.h>
+#endif
 
 #include <botan/auto_rng.h>
 #include <botan/certstor.h>
@@ -69,7 +71,11 @@ namespace Safira {
         // ── Filesystem helpers ──
 
         void HardenPermissions(const std::filesystem::path& p) {
+#ifndef _WIN32
             ::chmod(p.string().c_str(), S_IRUSR | S_IWUSR);
+#else
+            (void)p;
+#endif
         }
 
         [[nodiscard]] std::filesystem::path DataDir() {
@@ -79,7 +85,9 @@ namespace Safira {
                                 : std::filesystem::path(".safira");
             std::error_code ec;
             std::filesystem::create_directories(base, ec);
+#ifndef _WIN32
             ::chmod(base.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+#endif
             return base;
         }
 
@@ -205,7 +213,9 @@ namespace Safira {
             const auto certPath = dir / (safeName + ".cert.pem");
 
             std::filesystem::create_directories(dir);
+#ifndef _WIN32
             ::chmod(dir.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+#endif
 
             // ── YOUR CODE HERE ──
             // Try loading existing credentials from keyPath / certPath.

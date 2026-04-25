@@ -13,12 +13,7 @@
 #include <ranges>
 #include <thread>
 
-#include <arpa/inet.h>
-#include <cerrno>
-#include <fcntl.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "SocketCompat.h"
 
 #include <spdlog/spdlog.h>
 
@@ -110,8 +105,7 @@ namespace Safira {
     int Client::IOSend(WOLFSSL* /*ssl*/, char* buf, int sz, void* ctx) {
         auto* self = static_cast<Client*>(ctx);
 
-        const ssize_t sent = ::send(self->m_Socket, buf,
-                                    static_cast<std::size_t>(sz), 0);
+        const auto sent = ::send(self->m_Socket, buf, sz, 0);
         return (sent < 0) ? WOLFSSL_CBIO_ERR_GENERAL
                           : static_cast<int>(sent);
     }
@@ -167,6 +161,7 @@ namespace Safira {
 
     std::expected<std::string, ClientError>
     Client::ResolveHost(const std::string& host) {
+        Safira::net::EnsureWinsockInitialized();
         // Fast path: already an IPv4 literal.
         in_addr tmp{};
         if (::inet_pton(AF_INET, host.c_str(), &tmp) == 1)
@@ -192,7 +187,8 @@ namespace Safira {
 
     std::expected<int, ClientError>
     Client::CreateAndConnectSocket(const std::string& ip, uint16_t port) {
-        const int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        Safira::net::EnsureWinsockInitialized();
+        const int sock = static_cast<int>(::socket(AF_INET, SOCK_DGRAM, 0));
         if (sock < 0)
             return std::unexpected(ClientError::SocketCreation);
 
@@ -204,17 +200,17 @@ namespace Safira {
         };
 
         if (::inet_pton(AF_INET, ip.c_str(), &server.sin_addr) != 1) {
-            ::close(sock);
+            Safira::net::CloseSocket(sock);
             return std::unexpected(ClientError::SocketConnect);
         }
 
         // "connect" on UDP sets the default peer for send()/recv().
         if (::connect(sock, reinterpret_cast<sockaddr*>(&server), sizeof(server)) < 0) {
-            ::close(sock);
+            Safira::net::CloseSocket(sock);
             return std::unexpected(ClientError::SocketConnect);
         }
 
-        ::fcntl(sock, F_SETFL, O_NONBLOCK);
+        Safira::net::SetNonBlocking(sock);
         return sock;
     }
 
@@ -292,14 +288,14 @@ namespace Safira {
 
         auto ctxResult = CreateTLSContext();
         if (!ctxResult) {
-            ::close(sock);
+            Safira::net::CloseSocket(sock);
             return std::unexpected(ctxResult.error());
         }
         WolfContext ctx = std::move(*ctxResult);
 
         auto sslResult = CreateSession(ctx.get(), sock);
         if (!sslResult) {
-            ::close(sock);
+            Safira::net::CloseSocket(sock);
             return std::unexpected(sslResult.error());
         }
 
@@ -334,7 +330,7 @@ namespace Safira {
             return;
         }
 
-        m_Socket = resources->Socket;
+        m_Socket = static_cast<int>(resources->Socket);
         m_Ctx    = std::move(resources->Ctx);
         m_SSL    = std::move(resources->SSL);
 
@@ -358,22 +354,23 @@ namespace Safira {
         while (m_Running.load(std::memory_order_acquire)) {
 
             // Receive incoming UDP datagrams.
-            const ssize_t len = ::recv(m_Socket, rawBuf.data(), rawBuf.size(), 0);
+            const auto len = ::recv(m_Socket,
+                                    reinterpret_cast<char*>(rawBuf.data()),
+                                    static_cast<int>(rawBuf.size()), 0);
             if (len > 0) {
                 m_IncomingEncryptedBuffer.insert(
                     m_IncomingEncryptedBuffer.end(),
                     rawBuf.begin(), rawBuf.begin() + len);
             } else if (len < 0) {
-                const int err = errno;
-                if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
+                const int err = Safira::net::LastSocketError();
+                if (Safira::net::IsWouldBlock(err)) {
                     // Non-fatal, no data available right now.
-                } else if (err == ECONNREFUSED || err == ECONNRESET
-                           || err == ENETUNREACH || err == EHOSTUNREACH || err == ENOTCONN) {
-                    spdlog::warn("[client] server became unreachable (errno={})", err);
+                } else if (Safira::net::IsConnReset(err)) {
+                    spdlog::warn("[client] server became unreachable (err={})", err);
                     m_Running.store(false, std::memory_order_release);
                     continue;
                 } else {
-                    spdlog::error("[client] recv failed (errno={})", err);
+                    spdlog::error("[client] recv failed (err={})", err);
                     m_Running.store(false, std::memory_order_release);
                     continue;
                 }
@@ -396,7 +393,7 @@ namespace Safira {
         m_Ctx.reset();
         wolfSSL_Cleanup();
 
-        ::close(m_Socket);
+        Safira::net::CloseSocket(m_Socket);
         m_Socket = -1;
 
         m_Phase = Handshaking{};

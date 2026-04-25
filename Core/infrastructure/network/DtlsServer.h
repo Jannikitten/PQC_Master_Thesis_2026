@@ -20,7 +20,7 @@
 #include <variant>
 #include <vector>
 
-#include <netinet/in.h>
+#include "SocketCompat.h"
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 

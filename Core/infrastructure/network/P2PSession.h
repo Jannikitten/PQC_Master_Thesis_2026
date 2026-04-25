@@ -22,7 +22,7 @@
 #include <string_view>
 #include <vector>
 
-#include <netinet/in.h>
+#include "SocketCompat.h"
 
 namespace Safira {
 

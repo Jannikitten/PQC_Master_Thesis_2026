@@ -11,16 +11,12 @@
 #include <array>
 #include <charconv>
 #include <chrono>
-#include <cerrno>
 #include <format>
 #include <mutex>
 #include <ranges>
 #include <thread>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "SocketCompat.h"
 
 #include <imgui.h>
 #include <spdlog/spdlog.h>
@@ -33,7 +29,7 @@ namespace Safira {
 
     void UniqueSocket::Reset() noexcept {
         if (m_Fd >= 0) {
-            ::close(m_Fd);
+            Safira::net::CloseSocket(m_Fd);
             m_Fd = -1;
         }
     }
@@ -70,12 +66,14 @@ namespace Safira {
 
     std::expected<UniqueSocket, P2PError>
     PrivateChatSession::CreateListenSocket() {
-        UniqueSocket sock{ ::socket(AF_INET, SOCK_STREAM, 0) };
+        Safira::net::EnsureWinsockInitialized();
+        UniqueSocket sock{ static_cast<int>(::socket(AF_INET, SOCK_STREAM, 0)) };
         if (!sock)
             return std::unexpected(P2PError::SocketCreation);
 
         int yes = 1;
-        ::setsockopt(sock.Get(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        ::setsockopt(sock.Get(), SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<const char*>(&yes), sizeof(yes));
 
         sockaddr_in local{
             .sin_family = AF_INET,
@@ -95,7 +93,8 @@ namespace Safira {
 
     std::expected<UniqueSocket, P2PError>
     PrivateChatSession::CreateAndConnectSocket(std::string_view ip, uint16_t port) {
-        UniqueSocket sock{ ::socket(AF_INET, SOCK_STREAM, 0) };
+        Safira::net::EnsureWinsockInitialized();
+        UniqueSocket sock{ static_cast<int>(::socket(AF_INET, SOCK_STREAM, 0)) };
         if (!sock)
             return std::unexpected(P2PError::SocketCreation);
 
@@ -178,10 +177,10 @@ namespace Safira {
     void PrivateChatSession::SendRaw(std::span<const uint8_t> data) {
         std::size_t total = 0;
         while (total < data.size()) {
-            const ssize_t sent = ::send(
+            const auto sent = ::send(
                 m_Socket.Get(),
-                data.data() + total,
-                data.size() - total, 0);
+                reinterpret_cast<const char*>(data.data() + total),
+                static_cast<int>(data.size() - total), 0);
             if (sent <= 0) {
                 spdlog::error("[P2P] SendRaw: send() failed");
                 return;
@@ -298,23 +297,23 @@ namespace Safira {
             m_Running.store(false, std::memory_order_release);
             return;
         }
-        ::fcntl(listenFd, F_SETFL, O_NONBLOCK);
+        Safira::net::SetNonBlocking(listenFd);
 
         sockaddr_in peer{};
         socklen_t peerLen = sizeof(peer);
         int connFd = -1;
 
         while (m_Running.load(std::memory_order_acquire)) {
-            connFd = ::accept(listenFd, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+            connFd = static_cast<int>(::accept(listenFd, reinterpret_cast<sockaddr*>(&peer), &peerLen));
             if (connFd >= 0) break;
 
-            const int err = errno;
-            if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
+            const int err = Safira::net::LastSocketError();
+            if (Safira::net::IsWouldBlock(err)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-            if (err != EBADF && err != EINVAL)
-                spdlog::error("[P2P] accept() failed (errno={})", err);
+            if (!Safira::net::IsBadSocket(err))
+                spdlog::error("[P2P] accept() failed (err={})", err);
             break;
         }
 
@@ -393,10 +392,12 @@ namespace Safira {
     void PrivateChatSession::RunLoop() {
         std::array<uint8_t, 16384> recvBuf{};
 
-        ::fcntl(m_Socket.Get(), F_SETFL, O_NONBLOCK);
+        Safira::net::SetNonBlocking(m_Socket.Get());
 
         while (m_Running.load(std::memory_order_acquire)) {
-            const ssize_t len = ::recv(m_Socket.Get(), recvBuf.data(), recvBuf.size(), 0);
+            const auto len = ::recv(m_Socket.Get(),
+                                    reinterpret_cast<char*>(recvBuf.data()),
+                                    static_cast<int>(recvBuf.size()), 0);
 
             if (len > 0) {
                 auto data = std::span<const uint8_t>(recvBuf.data(), static_cast<std::size_t>(len));
@@ -414,18 +415,18 @@ namespace Safira {
                     std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
                 break;
             } else {
-                const int err = errno;
-                if (err == EWOULDBLOCK || err == EAGAIN || err == EINTR) {
+                const int err = Safira::net::LastSocketError();
+                if (Safira::net::IsWouldBlock(err)) {
                     // No data this tick.
-                } else if (err == ECONNRESET || err == ENOTCONN || err == EPIPE) {
+                } else if (Safira::net::IsConnReset(err)) {
                     AppendMessage("System",
                         std::format("{} disconnected.", m_PeerUsername), 0xFF888888);
                     break;
-                } else if ((err == EBADF || err == ENOTSOCK) &&
+                } else if (Safira::net::IsBadSocket(err) &&
                            !m_Running.load(std::memory_order_acquire)) {
                     break;
                 } else {
-                    spdlog::warn("[P2P] recv() failed (errno={})", err);
+                    spdlog::warn("[P2P] recv() failed (err={})", err);
                     break;
                 }
             }

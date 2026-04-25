@@ -11,11 +11,11 @@
 #include <print>
 #include <ranges>
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "SocketCompat.h"
+
+#ifndef _WIN32
+    #include <sys/stat.h>
+#endif
 
 
 #include <spdlog/spdlog.h>
@@ -34,7 +34,9 @@ namespace Safira {
 
             std::error_code ec;
             std::filesystem::create_directories(base, ec);
+#ifndef _WIN32
             ::chmod(base.string().c_str(), S_IRUSR | S_IWUSR | S_IXUSR);
+#endif
             return base;
         }
 
@@ -62,7 +64,9 @@ namespace Safira {
             if (!out.good()) return false;
 
             // Default to owner-read/write only for key and cert material.
+#ifndef _WIN32
             ::chmod(path.string().c_str(), S_IRUSR | S_IWUSR);
+#endif
             return static_cast<bool>(out);
         }
     } // namespace
@@ -193,8 +197,8 @@ namespace Safira {
         auto* io   = static_cast<IOContext*>(ctx);
         auto& addr = io->Client->Addr;
 
-        const ssize_t sent = ::sendto(
-            io->Socket, buf, static_cast<std::size_t>(sz), 0,
+        const auto sent = ::sendto(
+            io->Socket, buf, sz, 0,
             reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
 
         // Track bytes sent in client metrics.
@@ -210,13 +214,15 @@ namespace Safira {
     // ─────────────────────────────────────────────────────────────────────────────
 
     std::expected<int, ServerError> Server::CreateSocket() const {
-        const int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        Safira::net::EnsureWinsockInitialized();
+        const int sock = static_cast<int>(::socket(AF_INET, SOCK_DGRAM, 0));
         if (sock < 0)
             return std::unexpected(ServerError::SocketCreation);
 
         int yes = 1;
-        ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-        ::fcntl(sock, F_SETFL, O_NONBLOCK);
+        ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<const char*>(&yes), sizeof(yes));
+        Safira::net::SetNonBlocking(sock);
 
         const sockaddr_in local {
             .sin_family = AF_INET,
@@ -226,7 +232,7 @@ namespace Safira {
         };
 
         if (::bind(sock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) < 0) {
-            ::close(sock);
+            Safira::net::CloseSocket(sock);
             return std::unexpected(ServerError::SocketBind);
         }
 
@@ -341,8 +347,9 @@ namespace Safira {
             sockaddr_in from {};
             socklen_t   fromLen = sizeof(from);
 
-            const ssize_t len = ::recvfrom(
-                m_Socket, rawBuf.data(), rawBuf.size(), 0,
+            const auto len = ::recvfrom(
+                m_Socket, reinterpret_cast<char*>(rawBuf.data()),
+                static_cast<int>(rawBuf.size()), 0,
                 reinterpret_cast<sockaddr*>(&from), &fromLen);
 
             if (len > 0)
@@ -382,7 +389,7 @@ namespace Safira {
         m_Ctx.reset();
         wolfSSL_Cleanup();
 
-        ::close(m_Socket);
+        Safira::net::CloseSocket(m_Socket);
         m_Socket = -1;
         m_Running.store(false, std::memory_order_release);
     }
