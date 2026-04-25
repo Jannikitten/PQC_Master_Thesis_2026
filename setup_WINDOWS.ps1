@@ -29,6 +29,13 @@ function Die([string]$msg)           { Write-Host "[ERR ] $msg" -ForegroundColor
 function Update-Environment {
     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
                 [System.Environment]::GetEnvironmentVariable("PATH","User")
+
+    # Also re-read environment variables that installers set machine-wide so
+    # the current PowerShell session picks them up without a fresh terminal.
+    foreach ($name in @("VULKAN_SDK", "VK_SDK_PATH")) {
+        $val = [System.Environment]::GetEnvironmentVariable($name, "Machine")
+        if ($val) { Set-Item -Path "Env:$name" -Value $val }
+    }
 }
 
 # Load MSVC developer environment (sets cl.exe, nmake, INCLUDE, LIB, etc.).
@@ -179,6 +186,24 @@ if (-not (Get-Command glslc -ErrorAction SilentlyContinue) -and -not $env:VULKAN
     }
 } else {
     Write-Ok "Vulkan SDK already available"
+}
+
+# Final fallback: if no installer set VULKAN_SDK in the environment, scan
+# C:\VulkanSDK\* for an installation directory. CMake's FindVulkan needs
+# this variable to locate Vulkan_LIBRARY and Vulkan_INCLUDE_DIR.
+if (-not $env:VULKAN_SDK -and (Test-Path "C:\VulkanSDK")) {
+    $sdk = Get-ChildItem -Directory "C:\VulkanSDK" |
+           Sort-Object -Property Name -Descending |
+           Select-Object -First 1
+    if ($sdk) {
+        $env:VULKAN_SDK = $sdk.FullName
+        Write-Info "Discovered Vulkan SDK at $env:VULKAN_SDK (env var was not set)."
+    }
+}
+if ($env:VULKAN_SDK) {
+    Write-Ok "VULKAN_SDK=$env:VULKAN_SDK"
+} else {
+    Write-Warn2 "VULKAN_SDK is still not set — find_package(Vulkan) will likely fail."
 }
 
 # Locate OpenSSL install prefix (chocolatey default vs alternative layouts) ---
