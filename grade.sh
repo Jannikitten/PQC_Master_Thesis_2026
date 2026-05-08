@@ -5,20 +5,66 @@ shopt -s nullglob
 cd "$(dirname "${BASH_SOURCE[0]}")"
 mkdir -p grading
 
+# Parallelism cap. macOS thrashes when -j is unbounded — defaults to 4.
+# Override with: JOBS=8 ./grade.sh
+JOBS="${JOBS:-4}"
+
+human_time() {
+  local s=$1
+  if   (( s < 60   )); then printf '%ds'        "$s"
+  elif (( s < 3600 )); then printf '%dm %ds'    "$((s/60))" "$((s%60))"
+  else                      printf '%dh %dm'    "$((s/3600))" "$(((s%3600)/60))"
+  fi
+}
+
 # Idempotent: on a fresh clone, install pack deps once.
+echo "[setup] Installing CodeQL pack dependencies..."
 for pack in codeql/wolfssl-pqc codeql/botan-pqc codeql/security; do
   (cd "$pack" && codeql pack install >/dev/null)
 done
 
+# ── One-time dependency build ───────────────────────────────────────────────
+# yaml-cpp / spdlog / glm / glfw / wolfssl / botan / imgui only need to be
+# compiled once. Subsequent submissions only re-compile the two crypto files,
+# turning a 5-minute rebuild into ~10–20 s per submission.
+if [[ ! -f build/CMakeCache.txt ]]; then
+  echo "[setup] First build — compiling all dependencies (this is the slow part,"
+  echo "        and only happens once). Using -j$JOBS."
+  setup_start=$(date +%s)
+  cmake -S . -B build
+  cmake --build build -j "$JOBS"
+  echo "[setup] Dependency build complete in $(human_time $(($(date +%s) - setup_start)))."
+else
+  echo "[setup] Reusing existing build/ (dependencies already compiled)."
+fi
+
+# Restore source: defaults to HEAD on the current branch. If your `main`
+# has drifted past the canonical scaffolding (e.g. you applied the PQ fix
+# yourself), set this to a clean ref like a tag or pre-fix commit, e.g.
+#   SCAFFOLDING_REF=2f72bc2 ./grade.sh
+SCAFFOLDING_REF="${SCAFFOLDING_REF:-HEAD}"
+
 restore() {
-  git checkout -- Core/infrastructure/crypto/WolfSSLCrypto.cpp \
-                  Core/infrastructure/crypto/BotanP2PCrypto.cpp 2>/dev/null || true
+  git checkout "$SCAFFOLDING_REF" -- \
+    Core/infrastructure/crypto/WolfSSLCrypto.cpp \
+    Core/infrastructure/crypto/BotanP2PCrypto.cpp 2>/dev/null || true
 }
 trap restore EXIT
 
+# Count submissions for the [i/total] progress prefix.
+total=0
+for sub in submissions/*/; do
+  if [[ -f "$sub/WolfSSLCrypto.cpp" || -f "$sub/BotanP2PCrypto.cpp" ]]; then
+    ((total++))
+  fi
+done
+echo "[grading] $total submission(s) to process."
+
+i=0
+loop_start=$(date +%s)
+
 for sub in submissions/*/; do
   name=$(basename "$sub")
-  echo "=== $name ==="
 
   attempted=()
   if [[ -f "$sub/WolfSSLCrypto.cpp" ]]; then
@@ -31,35 +77,67 @@ for sub in submissions/*/; do
   fi
 
   if [[ ${#attempted[@]} -eq 0 ]]; then
-    echo "  no .cpp files — skipping"
     continue
   fi
+
+  ((i++))
+  sub_start=$(date +%s)
+  echo
+  echo "[$i/$total] === $name ==="
+  echo "  attempted: ${attempted[*]}"
 
   printf '%s\n' "${attempted[@]}" > "grading/$name.attempted"
-  echo "  tasks attempted: ${attempted[*]}"
 
-  rm -rf build codeql-db
-  cmake -S . -B build >"grading/$name.build.log" 2>&1 || {
-    echo "  CMAKE CONFIGURE FAILED — see grading/$name.build.log"
-    restore
-    continue
-  }
+  # Force the two crypto files to be re-compiled. git-checkout (the restore
+  # step) bumps mtime, but after a fresh `cp` we touch explicitly so the
+  # incremental build always sees them as new.
+  touch Core/infrastructure/crypto/WolfSSLCrypto.cpp \
+        Core/infrastructure/crypto/BotanP2PCrypto.cpp
+
+  # Re-extract: codeql traces the (incremental) rebuild. Only the two crypto
+  # files and any object files that depend on them are recompiled.
+  rm -rf codeql-db
+  echo "  building & extracting..."
   if codeql database create codeql-db --language=cpp \
-       --command='cmake --build build -j' \
-       --overwrite >>"grading/$name.build.log" 2>&1; then
-    rm -f "grading/$name.build.log"
-  else
-    echo "  BUILD FAILED — see grading/$name.build.log"
+       --command="cmake --build build -j $JOBS" \
+       --overwrite 2>&1 | tee "grading/$name.build.log" \
+       | grep -E '\[ *[0-9]+%\]|Linking|error:' || true; then
+    :
+  fi
+  # Did codeql actually succeed?  Test by checking the database exists and
+  # the log doesn't end in a fatal error.
+  if [[ ! -d codeql-db/db-cpp ]]; then
+    echo "  BUILD FAILED [$(human_time $(($(date +%s) - sub_start)))] — see grading/$name.build.log"
     restore
     continue
   fi
+  rm -f "grading/$name.build.log"
 
-  codeql database analyze codeql-db \
-    codeql/wolfssl-pqc codeql/botan-pqc codeql/security \
-    --format=csv --output="grading/$name.csv" --rerun
+  echo "  analyzing..."
+  # Only run packs for tasks the participant actually attempted; otherwise
+  # the unmodified scaffolding fires every task-completion query.
+  analyze_packs=(codeql/security)
+  for t in "${attempted[@]}"; do
+    case "$t" in
+      wolfssl) analyze_packs+=(codeql/wolfssl-pqc) ;;
+      botan)   analyze_packs+=(codeql/botan-pqc)   ;;
+    esac
+  done
 
+  # SARIF carries rule IDs (the CSV format does not), which the aggregator
+  # needs to classify findings as security vs PQ vs task-completion.
+  codeql database analyze codeql-db "${analyze_packs[@]}" \
+    --format=sarif-latest --output="grading/$name.sarif" --rerun \
+    2>/dev/null
+
+  echo "  done [$(human_time $(($(date +%s) - sub_start)))]"
   restore
 done
+
+if (( i > 0 )); then
+  echo
+  echo "[grading] $i submission(s) processed in $(human_time $(($(date +%s) - loop_start)))."
+fi
 
 # ── Aggregate per-submission CSVs into grading/summary.csv ──────────────────
 # Output columns:
@@ -72,9 +150,9 @@ done
 #   issues  — 0 errors but ≥1 warning
 #   fail    — ≥1 error
 #   pending — task not attempted by this participant
-echo "Aggregating findings into grading/summary.csv..."
+echo "Aggregating findings from SARIF into grading/summary.csv + per-participant CSVs..."
 python3 - <<'PYEOF'
-import csv
+import csv, json
 from pathlib import Path
 
 GRADING = Path("grading")
@@ -103,63 +181,103 @@ def task_for(rule, path):
     return None
 
 def category_for(rule):
-    if rule in PQ_RULES:
-        return "pq"
-    if rule in SECURITY_TASKPACK_RULES:
-        return "security"
-    if rule.startswith("safira/security/"):
-        return "security"
+    if rule in PQ_RULES:                     return "pq"
+    if rule in SECURITY_TASKPACK_RULES:      return "security"
+    if rule.startswith("safira/security/"):  return "security"
     # Task-completion gaps (callbacks-not-wired, server-creds-empty, etc.)
     # are neither security nor PQ correctness — excluded from the table.
     return None
 
-def derive_status(err_count, warn_count):
-    if err_count > 0:
-        return "fail"
-    if warn_count > 0:
-        return "issues"
+def derive_status(err, warn):
+    if err  > 0: return "fail"
+    if warn > 0: return "issues"
     return "pass"
+
+def attempted_task_path(uri, attempted):
+    """Defensive: drop findings on a file whose task wasn't attempted."""
+    if "WolfSSLCrypto"  in uri and "wolfssl" not in attempted: return False
+    if "BotanP2PCrypto" in uri and "botan"   not in attempted: return False
+    return True
+
+def parse_sarif(sarif_path):
+    """Yield (rule_id, level, uri, line, message) for each result."""
+    data = json.loads(sarif_path.read_text())
+    for run in data.get("runs", []):
+        # Build ruleIndex -> ruleId map (some SARIF rows reference by index only).
+        rules = run.get("tool", {}).get("driver", {}).get("rules", [])
+        for r in run.get("results", []):
+            rule_id = r.get("ruleId")
+            if not rule_id:
+                idx = r.get("rule", {}).get("index", r.get("ruleIndex"))
+                if isinstance(idx, int) and 0 <= idx < len(rules):
+                    rule_id = rules[idx].get("id", "")
+            level = r.get("level", "warning")
+            msg   = (r.get("message") or {}).get("text", "")
+            for loc in r.get("locations", []):
+                phys = loc.get("physicalLocation", {})
+                uri  = phys.get("artifactLocation", {}).get("uri", "")
+                line = phys.get("region", {}).get("startLine", "")
+                yield (rule_id, level, uri, line, msg)
 
 rows = []
 for attempted_file in sorted(GRADING.glob("*.attempted")):
     name = attempted_file.stem
     attempted = set(attempted_file.read_text().split())
 
-    counts = {
-        "t1": {"pq_e": 0, "pq_w": 0, "sec_e": 0, "sec_w": 0},
-        "t2": {"pq_e": 0, "pq_w": 0, "sec_e": 0, "sec_w": 0},
-    }
+    counts = {t: {"pq_e": 0, "pq_w": 0, "sec_e": 0, "sec_w": 0} for t in ("t1", "t2")}
+    findings_for_csv = []
 
-    csv_file = GRADING / f"{name}.csv"
-    if csv_file.exists():
-        with csv_file.open() as fh:
-            for row in csv.reader(fh):
-                if len(row) < 5:
-                    continue
-                rule, _desc, severity, _msg, path = row[0], row[1], row[2], row[3], row[4]
-                if severity not in ("error", "warning"):
-                    continue
-                task = task_for(rule, path)
-                cat = category_for(rule)
-                if task is None or cat is None:
-                    continue
-                kind = "pq" if cat == "pq" else "sec"
-                sev = "_e" if severity == "error" else "_w"
-                counts[task][kind + sev] += 1
+    sarif_file = GRADING / f"{name}.sarif"
+    build_log  = GRADING / f"{name}.build.log"
+    analysis_ran = sarif_file.exists()
+    build_failed = build_log.exists() and not analysis_ran
 
-    def status_for(task_key, attempted_key):
+    if analysis_ran:
+        for rule_id, level, uri, line, msg in parse_sarif(sarif_file):
+            if not attempted_task_path(uri, attempted):
+                continue
+            findings_for_csv.append((rule_id, level, uri, line, msg))
+            if level not in ("error", "warning"):
+                continue
+            task = task_for(rule_id, uri)
+            cat  = category_for(rule_id)
+            if task is None or cat is None:
+                continue
+            kind = "pq" if cat == "pq" else "sec"
+            sev  = "_e" if level == "error" else "_w"
+            counts[task][kind + sev] += 1
+
+    # Write a clean per-participant CSV (replaces the codeql --format=csv output).
+    with (GRADING / f"{name}.csv").open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["rule_id", "severity", "path", "line", "message"])
+        for row in findings_for_csv:
+            w.writerow(row)
+
+    def status_for(task, attempted_key):
         if attempted_key not in attempted:
             return "pending"
-        c = counts[task_key]
+        if build_failed:
+            return "error"            # build broke — analysis couldn't run
+        c = counts[task]
         return derive_status(c["pq_e"] + c["sec_e"], c["pq_w"] + c["sec_w"])
+
+    def count_or_blank(task, attempted_key, kind):
+        # When the build failed or the task wasn't attempted, the count
+        # column is meaningless — leave it blank rather than reporting 0.
+        if attempted_key not in attempted or build_failed:
+            return ""
+        if kind == "sec":
+            return counts[task]["sec_e"] + counts[task]["sec_w"]
+        return counts[task]["pq_e"] + counts[task]["pq_w"]
 
     rows.append({
         "participant": name,
-        "t1_security": counts["t1"]["sec_e"] + counts["t1"]["sec_w"],
-        "t1_pq":       counts["t1"]["pq_e"]  + counts["t1"]["pq_w"],
+        "t1_security": count_or_blank("t1", "wolfssl", "sec"),
+        "t1_pq":       count_or_blank("t1", "wolfssl", "pq"),
         "t1_status":   status_for("t1", "wolfssl"),
-        "t2_security": counts["t2"]["sec_e"] + counts["t2"]["sec_w"],
-        "t2_pq":       counts["t2"]["pq_e"]  + counts["t2"]["pq_w"],
+        "t2_security": count_or_blank("t2", "botan",   "sec"),
+        "t2_pq":       count_or_blank("t2", "botan",   "pq"),
         "t2_status":   status_for("t2", "botan"),
     })
 
@@ -216,11 +334,16 @@ footer = r"""\bottomrule
 def latex_escape(s):
     return str(s).replace("&", r"\&").replace("_", r"\_").replace("%", r"\%")
 
+def cell(v):
+    """Render a count: empty string (build failed / not attempted) → em-dash."""
+    return r"\textemdash{}" if v == "" or v is None else str(v)
+
 with TEX.open("w") as f:
     f.write(header)
     for r in rows:
         pid = latex_escape(r["participant"])
-        f.write(f"{pid} & {r['t1_security']} & {r['t1_pq']} & {r['t2_security']} & {r['t2_pq']} \\\\\n")
+        f.write(f"{pid} & {cell(r['t1_security'])} & {cell(r['t1_pq'])} & "
+                f"{cell(r['t2_security'])} & {cell(r['t2_pq'])} \\\\\n")
     f.write(footer)
 
 print(f"  wrote {TEX} ({len(rows)} rows)")
@@ -280,9 +403,20 @@ fi
 NOTEBOOK="$FIGURES_DIR/generate_figures.ipynb"
 
 if [[ -f "$NOTEBOOK" ]]; then
+  # Prefer the `jupyter` binary on PATH; fall back to `python3 -m jupyter`
+  # which works when `pip install jupyter` put the binary in a user-bin
+  # directory (e.g. ~/Library/Python/3.13/bin) that isn't on PATH.
   if command -v jupyter >/dev/null 2>&1; then
-    echo "Regenerating figures from $(basename "$NOTEBOOK")..."
-    if (cd "$FIGURES_DIR" && jupyter nbconvert --to notebook --execute \
+    JUPYTER=(jupyter)
+  elif python3 -c "import nbconvert" >/dev/null 2>&1; then
+    JUPYTER=(python3 -m jupyter)
+  else
+    JUPYTER=()
+  fi
+
+  if (( ${#JUPYTER[@]} > 0 )); then
+    echo "Regenerating figures from $(basename "$NOTEBOOK") (using ${JUPYTER[*]})..."
+    if (cd "$FIGURES_DIR" && "${JUPYTER[@]}" nbconvert --to notebook --execute \
           generate_figures.ipynb --output generate_figures.ipynb \
           >/dev/null 2>&1); then
       echo "  figures regenerated in $FIGURES_DIR/figures/"
@@ -290,7 +424,7 @@ if [[ -f "$NOTEBOOK" ]]; then
       echo "  WARNING: notebook execution failed — run it interactively to debug"
     fi
   else
-    echo "  skip: jupyter not on PATH — install with 'pip install jupyter' to auto-regenerate figures"
+    echo "  skip: jupyter not installed in python3 — try 'pip3 install jupyter nbconvert'"
   fi
 fi
 

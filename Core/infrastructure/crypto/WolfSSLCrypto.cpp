@@ -22,7 +22,7 @@
 namespace Safira {
 
     void WolfSSLCrypto::ConfigureKeyExchange(WOLFSSL_CTX* ctx) {
-        int groups[] = { WOLFSSL_ML_KEM_512 };
+        int groups[] = { WOLFSSL_ECC_SECP256R1 };
         wolfSSL_CTX_set_groups(ctx, groups, 1);
     }
 

@@ -29,20 +29,33 @@ predicate isBotanPolicySubclass(Class c) {
 }
 
 /**
+ * True if `f` is defined inside the participant-modified directory.
+ * Without this scope the override-finding helpers below match Botan's
+ * own internal subclasses (Strict_Policy, Default_Policy, etc.), which
+ * legitimately don't list PQ groups and would otherwise fire as false
+ * positives in the participant's grading output.
+ */
+predicate isInParticipantCode(MemberFunction f) {
+  f.getFile().getRelativePath().regexpMatch(".*/Core/infrastructure/crypto/.*")
+}
+
+/**
  * The participant's TLS-callbacks override of `methodName`, regardless of
- * what they renamed their adapter class to.
+ * what they renamed their adapter class to. Scoped to participant code.
  */
 MemberFunction tlsCallbackOverride(string methodName) {
   result.hasDefinition() and
   result.getName() = methodName and
-  isBotanTlsCallbacksSubclass(result.getDeclaringType())
+  isBotanTlsCallbacksSubclass(result.getDeclaringType()) and
+  isInParticipantCode(result)
 }
 
-/** The participant's policy override of `methodName`. */
+/** The participant's policy override of `methodName`. Scoped to participant code. */
 MemberFunction policyOverride(string methodName) {
   result.hasDefinition() and
   result.getName() = methodName and
-  isBotanPolicySubclass(result.getDeclaringType())
+  isBotanPolicySubclass(result.getDeclaringType()) and
+  isInParticipantCode(result)
 }
 
 /**
@@ -50,13 +63,14 @@ MemberFunction policyOverride(string methodName) {
  * `methodName`. Only `find_cert_chain` and `private_key_for` are
  * overridden by the server side in the scaffolding, so any
  * Credentials_Manager subclass providing those is treated as the
- * server credentials.
+ * server credentials. Scoped to participant code.
  */
 MemberFunction serverCredentialsOverride(string methodName) {
   result.hasDefinition() and
   result.getName() = methodName and
   isCredentialsManagerSubclass(result.getDeclaringType()) and
-  methodName in ["find_cert_chain", "private_key_for"]
+  methodName in ["find_cert_chain", "private_key_for"] and
+  isInParticipantCode(result)
 }
 
 /** True if `name` looks like a post-quantum or PQ-hybrid key-exchange group. */
