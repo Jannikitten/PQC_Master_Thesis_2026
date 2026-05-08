@@ -1,0 +1,11 @@
+name: safira/botan-pqc
+version: 0.1.0
+description: |
+  Static checks for Programming Task 2 — BotanP2PCrypto.
+  Flags submissions that did not migrate to a post-quantum TLS 1.3
+  configuration, did not implement the credential / callback TODOs, and
+  records which algorithms were chosen.
+library: false
+dependencies:
+  codeql/cpp-all: "*"
+default-suite-file: suite.qls

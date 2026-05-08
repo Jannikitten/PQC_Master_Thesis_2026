@@ -1,0 +1,13 @@
+name: safira/security
+version: 0.1.0
+description: |
+  Cryptographic and general-security checks applied to PQC participant
+  submissions. Scoped to the participant-modified directory
+  (Core/infrastructure/crypto/) so the framework code does not produce
+  noise. Catches weak algorithms, disabled certificate verification,
+  hardcoded keys, insecure RNGs, banned C functions, permissive file
+  permissions, and undersized RSA keys.
+library: false
+dependencies:
+  codeql/cpp-all: "*"
+default-suite-file: suite.qls

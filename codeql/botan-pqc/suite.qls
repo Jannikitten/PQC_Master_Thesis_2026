@@ -1,0 +1,3 @@
+- description: "Safira PQC Task 2 — BotanP2PCrypto checks"
+- queries: .
+  from: safira/botan-pqc

@@ -1,0 +1,10 @@
+name: safira/wolfssl-pqc
+version: 0.1.0
+description: |
+  Static checks for Programming Task 1 — WolfSSLCrypto.
+  Flags submissions that did not migrate the DTLS key-exchange to a
+  post-quantum group, and records which group/protocol label was chosen.
+library: false
+dependencies:
+  codeql/cpp-all: "*"
+default-suite-file: suite.qls

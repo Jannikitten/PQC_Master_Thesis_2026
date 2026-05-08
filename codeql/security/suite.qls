@@ -1,0 +1,3 @@
+- description: "Safira PQC — security hygiene checks"
+- queries: .
+  from: safira/security

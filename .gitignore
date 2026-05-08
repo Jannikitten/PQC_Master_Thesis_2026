@@ -1,5 +1,9 @@
 build*/
 docs*/
+submissions*/
+grading*/
+codeql-db/
+codeql-results.csv
 .DS_Store
 .claude*/
 .idea*/
