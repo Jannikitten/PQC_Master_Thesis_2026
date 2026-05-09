@@ -88,47 +88,41 @@ for sub in submissions/*/; do
 
   printf '%s\n' "${attempted[@]}" > "grading/$name.attempted"
 
-  # Force the two crypto files to be re-compiled. git-checkout (the restore
-  # step) bumps mtime, but after a fresh `cp` we touch explicitly so the
-  # incremental build always sees them as new.
-  touch Core/infrastructure/crypto/WolfSSLCrypto.cpp \
-        Core/infrastructure/crypto/BotanP2PCrypto.cpp
-
-  # Re-extract: codeql traces the (incremental) rebuild. Only the two crypto
-  # files and any object files that depend on them are recompiled.
-  rm -rf codeql-db
-  echo "  building & extracting..."
-  if codeql database create codeql-db --language=cpp \
-       --command="cmake --build build -j $JOBS" \
-       --overwrite 2>&1 | tee "grading/$name.build.log" \
-       | grep -E '\[ *[0-9]+%\]|Linking|error:' || true; then
-    :
-  fi
-  # Did codeql actually succeed?  Test by checking the database exists and
-  # the log doesn't end in a fatal error.
-  if [[ ! -d codeql-db/db-cpp ]]; then
-    echo "  BUILD FAILED [$(human_time $(($(date +%s) - sub_start)))] — see grading/$name.build.log"
-    restore
-    continue
-  fi
-  rm -f "grading/$name.build.log"
-
-  echo "  analyzing..."
-  # Only run packs for tasks the participant actually attempted; otherwise
-  # the unmodified scaffolding fires every task-completion query.
-  analyze_packs=(codeql/security)
+  # Per-task isolated compilation: each task's crypto file is built with
+  # its OWN per-source make target (no linking). A bad BotanP2PCrypto.cpp
+  # can no longer kill the WolfSSLCrypto.cpp extraction, so we still get
+  # data for whichever task actually compiled.
   for t in "${attempted[@]}"; do
     case "$t" in
-      wolfssl) analyze_packs+=(codeql/wolfssl-pqc) ;;
-      botan)   analyze_packs+=(codeql/botan-pqc)   ;;
+      wolfssl)
+        src="Core/infrastructure/crypto/WolfSSLCrypto.cpp"
+        target="Core/infrastructure/crypto/WolfSSLCrypto.o"
+        suffix="t1"
+        analyze_packs=(codeql/wolfssl-pqc codeql/security)
+        ;;
+      botan)
+        src="Core/infrastructure/crypto/BotanP2PCrypto.cpp"
+        target="Core/infrastructure/crypto/BotanP2PCrypto.o"
+        suffix="t2"
+        analyze_packs=(codeql/botan-pqc codeql/security)
+        ;;
     esac
-  done
 
-  # SARIF carries rule IDs (the CSV format does not), which the aggregator
-  # needs to classify findings as security vs PQ vs task-completion.
-  codeql database analyze codeql-db "${analyze_packs[@]}" \
-    --format=sarif-latest --output="grading/$name.sarif" --rerun \
-    2>/dev/null
+    echo "  [$t] building & extracting..."
+    touch "$src"
+    rm -rf "codeql-db-$suffix"
+
+    if codeql database create "codeql-db-$suffix" --language=cpp \
+         --command="make -C build $target -j $JOBS" \
+         --overwrite >"grading/$name.$suffix.build.log" 2>&1; then
+      rm -f "grading/$name.$suffix.build.log"
+      codeql database analyze "codeql-db-$suffix" "${analyze_packs[@]}" \
+        --format=sarif-latest --output="grading/$name.$suffix.sarif" --rerun \
+        2>/dev/null
+    else
+      echo "    $t BUILD FAILED — see grading/$name.$suffix.build.log"
+    fi
+  done
 
   echo "  done [$(human_time $(($(date +%s) - sub_start)))]"
   restore
@@ -227,27 +221,30 @@ for attempted_file in sorted(GRADING.glob("*.attempted")):
     counts = {t: {"pq_e": 0, "pq_w": 0, "sec_e": 0, "sec_w": 0} for t in ("t1", "t2")}
     findings_for_csv = []
 
-    sarif_file = GRADING / f"{name}.sarif"
-    build_log  = GRADING / f"{name}.build.log"
-    analysis_ran = sarif_file.exists()
-    build_failed = build_log.exists() and not analysis_ran
+    # Per-task SARIF / build-log detection (each task is built independently).
+    sarif      = {"t1": GRADING / f"{name}.t1.sarif", "t2": GRADING / f"{name}.t2.sarif"}
+    build_log  = {"t1": GRADING / f"{name}.t1.build.log", "t2": GRADING / f"{name}.t2.build.log"}
+    ran        = {t: sarif[t].exists() for t in ("t1", "t2")}
+    build_fail = {t: build_log[t].exists() and not ran[t] for t in ("t1", "t2")}
 
-    if analysis_ran:
-        for rule_id, level, uri, line, msg in parse_sarif(sarif_file):
+    for t in ("t1", "t2"):
+        if not ran[t]:
+            continue
+        for rule_id, level, uri, line, msg in parse_sarif(sarif[t]):
             if not attempted_task_path(uri, attempted):
                 continue
             findings_for_csv.append((rule_id, level, uri, line, msg))
             if level not in ("error", "warning"):
                 continue
-            task = task_for(rule_id, uri)
+            task = task_for(rule_id, uri) or t
             cat  = category_for(rule_id)
-            if task is None or cat is None:
+            if cat is None:
                 continue
             kind = "pq" if cat == "pq" else "sec"
             sev  = "_e" if level == "error" else "_w"
             counts[task][kind + sev] += 1
 
-    # Write a clean per-participant CSV (replaces the codeql --format=csv output).
+    # Write a clean per-participant CSV (rule_id, severity, path, line, message).
     with (GRADING / f"{name}.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["rule_id", "severity", "path", "line", "message"])
@@ -257,15 +254,13 @@ for attempted_file in sorted(GRADING.glob("*.attempted")):
     def status_for(task, attempted_key):
         if attempted_key not in attempted:
             return "pending"
-        if build_failed:
-            return "error"            # build broke — analysis couldn't run
+        if build_fail[task]:
+            return "error"            # this task's build broke — analysis couldn't run
         c = counts[task]
         return derive_status(c["pq_e"] + c["sec_e"], c["pq_w"] + c["sec_w"])
 
     def count_or_blank(task, attempted_key, kind):
-        # When the build failed or the task wasn't attempted, the count
-        # column is meaningless — leave it blank rather than reporting 0.
-        if attempted_key not in attempted or build_failed:
+        if attempted_key not in attempted or build_fail[task]:
             return ""
         if kind == "sec":
             return counts[task]["sec_e"] + counts[task]["sec_w"]
@@ -308,6 +303,18 @@ if not SUMMARY.exists():
 with SUMMARY.open() as f:
     rows = list(csv.DictReader(f))
 
+# Identify participants whose build failed for each task — needed for the
+# explanatory footnote so em-dashes don't read as "not attempted".
+build_failed = []
+for r in rows:
+    failed_tasks = []
+    if r["t1_status"] == "error": failed_tasks.append("Task~1")
+    if r["t2_status"] == "error": failed_tasks.append("Task~2")
+    if failed_tasks:
+        build_failed.append(f"{r['participant']} ({', '.join(failed_tasks)})")
+
+build_failed_note = "; ".join(build_failed) if build_failed else "none"
+
 header = r"""\begin{table}[h]
 \centering
 \caption{Static analysis findings of submitted code}
@@ -319,13 +326,14 @@ Participant & \makecell[c]{Task 1 security \\ findings \tnote{a}} & \makecell[c]
 \midrule
 """
 
-footer = r"""\bottomrule
+footer_template = r"""\bottomrule
 \end{tabular}
 
 \begin{tablenotes}
 \footnotesize
-\item[a] Security vulnerabilities identified via CodeQL static analysis
-\item[b] Denotes the instantiation of post-quantum primitives. Absence of these schemes constituted an automatic task failure. Evaluated via CodeQL and manual review.
+\item[a] Security findings identified via CodeQL: weak cryptographic primitives (SHA-1, MD5, MD4, DES, RC4, ECB mode), disabled certificate verification (\texttt{SSL\_VERIFY\_NONE}), hardcoded keys / certificates, banned C functions (\texttt{gets}, \texttt{strcpy}, \texttt{sprintf}, \ldots), permissive file permissions on credential files, undersized RSA keys ($<2048$ bits), insecure RNG sources, RSA PKCS\#1\,v1.5 signatures, secrets logged or thrown in exceptions, and TOFU pin-store bypasses.
+\item[b] PQ correctness, evaluated via CodeQL and manual review: post-quantum or hybrid key-exchange group selected (ML-KEM, hybrid X25519+ML-KEM); post-quantum signature scheme allowed (ML-DSA, SLH-DSA); user-facing protocol description reflects the migration; pre-FIPS-203/204 algorithm names (Kyber, Dilithium, SPHINCS+) avoided. Absence of any post-quantum primitive constituted an automatic task failure.
+\item[c] \textemdash{} indicates the task was not attempted, or that the participant's submission failed to compile and CodeQL could not analyse it. Build failures: __BUILD_FAILED__.
 \end{tablenotes}
 \end{threeparttable}
 \end{table}
@@ -334,17 +342,27 @@ footer = r"""\bottomrule
 def latex_escape(s):
     return str(s).replace("&", r"\&").replace("_", r"\_").replace("%", r"\%")
 
-def cell(v):
-    """Render a count: empty string (build failed / not attempted) → em-dash."""
-    return r"\textemdash{}" if v == "" or v is None else str(v)
+def cell(v, status):
+    """Render a count: empty (build failed / not attempted) → em-dash, with
+    a footnote pointer iff the task's build failed."""
+    if v == "" or v is None:
+        if status == "error":
+            return r"\textemdash\tnote{c}"
+        return r"\textemdash{}"
+    return str(v)
 
 with TEX.open("w") as f:
     f.write(header)
     for r in rows:
         pid = latex_escape(r["participant"])
-        f.write(f"{pid} & {cell(r['t1_security'])} & {cell(r['t1_pq'])} & "
-                f"{cell(r['t2_security'])} & {cell(r['t2_pq'])} \\\\\n")
-    f.write(footer)
+        f.write(
+            f"{pid} & "
+            f"{cell(r['t1_security'], r['t1_status'])} & "
+            f"{cell(r['t1_pq'],       r['t1_status'])} & "
+            f"{cell(r['t2_security'], r['t2_status'])} & "
+            f"{cell(r['t2_pq'],       r['t2_status'])} \\\\\n"
+        )
+    f.write(footer_template.replace("__BUILD_FAILED__", build_failed_note))
 
 print(f"  wrote {TEX} ({len(rows)} rows)")
 PYEOF
