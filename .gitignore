@@ -3,10 +3,13 @@ docs*/
 submissions*/
 grading*/
 codeql-db/
+codeql-db-t1/
+codeql-db-t2/
 codeql-results.csv
 .DS_Store
 .claude*/
 .idea*/
 .vscode*/
+.grade-backup*/
 ConnectionDetails.yaml
 MessageHistory.yaml

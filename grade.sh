@@ -44,10 +44,34 @@ fi
 #   SCAFFOLDING_REF=2f72bc2 ./grade.sh
 SCAFFOLDING_REF="${SCAFFOLDING_REF:-HEAD}"
 
+# ── Heal any prior bad state, then snapshot pristine scaffolding ─────────────
+# Previous runs that died before their restore step (or whose `git checkout`
+# raced VS Code's git extension for .git/index.lock) could leave the working
+# tree holding the last participant's code. Force-restore from git up front
+# so we always start from a known-good state.
+echo "[setup] Restoring crypto scaffolding from $SCAFFOLDING_REF..."
+if ! git checkout "$SCAFFOLDING_REF" -- \
+       Core/infrastructure/crypto/WolfSSLCrypto.cpp \
+       Core/infrastructure/crypto/BotanP2PCrypto.cpp; then
+  cat >&2 <<EOF
+[setup] FATAL: cannot restore crypto scaffolding from git ref '$SCAFFOLDING_REF'.
+  Common cause: a stale .git/index.lock from VS Code's git extension.
+  Workaround: pkill -9 -f 'git status' && rm -f .git/index.lock, then retry.
+EOF
+  exit 1
+fi
+
+# Snapshot the pristine scaffolding to a backup outside .git's reach. The
+# rest of the script restores from this snapshot — no further git operations,
+# no lock contention.
+BACKUP_DIR="$(pwd)/.grade-backup"
+mkdir -p "$BACKUP_DIR"
+cp Core/infrastructure/crypto/WolfSSLCrypto.cpp  "$BACKUP_DIR/"
+cp Core/infrastructure/crypto/BotanP2PCrypto.cpp "$BACKUP_DIR/"
+
 restore() {
-  git checkout "$SCAFFOLDING_REF" -- \
-    Core/infrastructure/crypto/WolfSSLCrypto.cpp \
-    Core/infrastructure/crypto/BotanP2PCrypto.cpp 2>/dev/null || true
+  cp "$BACKUP_DIR/WolfSSLCrypto.cpp"  Core/infrastructure/crypto/WolfSSLCrypto.cpp
+  cp "$BACKUP_DIR/BotanP2PCrypto.cpp" Core/infrastructure/crypto/BotanP2PCrypto.cpp
 }
 trap restore EXIT
 
@@ -112,8 +136,12 @@ for sub in submissions/*/; do
     touch "$src"
     rm -rf "codeql-db-$suffix"
 
+    # Per-task compile is a single file → -j 1. Parallel make races the
+    # codeql preload_tracer's pre-finalize step on macOS, which produces
+    # spurious "Dataset has been finalized" errors *after* a successful
+    # compile. Single-threaded extraction is deterministic.
     if codeql database create "codeql-db-$suffix" --language=cpp \
-         --command="make -C build $target -j $JOBS" \
+         --command="make -C build $target -j 1" \
          --overwrite >"grading/$name.$suffix.build.log" 2>&1; then
       rm -f "grading/$name.$suffix.build.log"
       codeql database analyze "codeql-db-$suffix" "${analyze_packs[@]}" \
@@ -152,20 +180,42 @@ from pathlib import Path
 GRADING = Path("grading")
 SUMMARY = GRADING / "summary.csv"
 
-# Rules that count as "PQ correctness" findings.
-PQ_RULES = {
-    "safira/wolfssl/configure-key-exchange-not-pq",
-    "safira/wolfssl/protocol-description-not-pq",
-    "safira/botan/policy-no-pq-groups",
-    "safira/botan/policy-pq-kex-classical-sigs",
-    "safira/security/legacy-pqc-naming",
-}
+# ── Check catalogue ─────────────────────────────────────────────────────────
+# Each (rule_id, category, applicable_tasks). The CSV / LaTeX legend is
+# generated from this list, so adding a new query here is the only thing
+# you need to change to surface it in the table.
+CHECKS = [
+    # Generic security checks (apply to either task, scoped by file path)
+    ("safira/security/weak-hash",                      "security", ("t1", "t2")),
+    ("safira/security/weak-cipher",                    "security", ("t1", "t2")),
+    ("safira/security/cert-verify-disabled",           "security", ("t1", "t2")),
+    ("safira/security/hardcoded-secret",               "security", ("t1", "t2")),
+    ("safira/security/insecure-rng",                   "security", ("t1", "t2")),
+    ("safira/security/banned-c-function",              "security", ("t1", "t2")),
+    ("safira/security/insecure-file-perms",            "security", ("t1", "t2")),
+    ("safira/security/small-rsa-key",                  "security", ("t1", "t2")),
+    ("safira/security/secret-in-log-or-exception",     "security", ("t1", "t2")),
+    ("safira/security/rsa-pkcs1-v1-5",                 "security", ("t1", "t2")),
+    # Botan-only auth-bypass (T2 security)
+    ("safira/botan/tofu-pin-unconditional-overwrite",      "security", ("t2",)),
+    ("safira/botan/callbacks-verify-cert-chain-empty",     "security", ("t2",)),
+    # PQ correctness — Task 1 (WolfSSL DTLS)
+    ("safira/wolfssl/configure-key-exchange-not-pq",       "pq",       ("t1",)),
+    ("safira/wolfssl/protocol-description-not-pq",         "pq",       ("t1",)),
+    # PQ correctness — Task 2 (Botan TLS)
+    ("safira/botan/policy-no-pq-groups",                   "pq",       ("t2",)),
+    ("safira/botan/policy-pq-kex-classical-sigs",          "pq",       ("t2",)),
+    # PQ correctness — cross-task (FIPS-203/204 naming)
+    ("safira/security/legacy-pqc-naming",                  "pq",       ("t1", "t2")),
+]
 
-# Task-pack rules that count as "security" findings (auth bypass).
-SECURITY_TASKPACK_RULES = {
-    "safira/botan/tofu-pin-unconditional-overwrite",
-    "safira/botan/callbacks-verify-cert-chain-empty",
-}
+PQ_RULES              = {r for r, c, _ in CHECKS if c == "pq"}
+SECURITY_RULES        = {r for r, c, _ in CHECKS if c == "security"}
+SECURITY_TASKPACK_RULES = {r for r, _, _ in CHECKS
+                           if r.startswith("safira/botan/") or r.startswith("safira/wolfssl/")}
+
+def applicable_rules(task, category):
+    return [r for r, c, tasks in CHECKS if c == category and task in tasks]
 
 def task_for(rule, path):
     if "WolfSSLCrypto" in path or rule.startswith("safira/wolfssl/"):
@@ -175,9 +225,9 @@ def task_for(rule, path):
     return None
 
 def category_for(rule):
-    if rule in PQ_RULES:                     return "pq"
-    if rule in SECURITY_TASKPACK_RULES:      return "security"
-    if rule.startswith("safira/security/"):  return "security"
+    for r, c, _ in CHECKS:
+        if r == rule:
+            return c
     # Task-completion gaps (callbacks-not-wired, server-creds-empty, etc.)
     # are neither security nor PQ correctness — excluded from the table.
     return None
@@ -219,6 +269,7 @@ for attempted_file in sorted(GRADING.glob("*.attempted")):
     attempted = set(attempted_file.read_text().split())
 
     counts = {t: {"pq_e": 0, "pq_w": 0, "sec_e": 0, "sec_w": 0} for t in ("t1", "t2")}
+    fired  = {t: set() for t in ("t1", "t2")}   # rule_ids that produced ≥1 finding per task
     findings_for_csv = []
 
     # Per-task SARIF / build-log detection (each task is built independently).
@@ -240,6 +291,7 @@ for attempted_file in sorted(GRADING.glob("*.attempted")):
             cat  = category_for(rule_id)
             if cat is None:
                 continue
+            fired[task].add(rule_id)
             kind = "pq" if cat == "pq" else "sec"
             sev  = "_e" if level == "error" else "_w"
             counts[task][kind + sev] += 1
@@ -255,7 +307,7 @@ for attempted_file in sorted(GRADING.glob("*.attempted")):
         if attempted_key not in attempted:
             return "pending"
         if build_fail[task]:
-            return "error"            # this task's build broke — analysis couldn't run
+            return "error"
         c = counts[task]
         return derive_status(c["pq_e"] + c["sec_e"], c["pq_w"] + c["sec_w"])
 
@@ -266,20 +318,31 @@ for attempted_file in sorted(GRADING.glob("*.attempted")):
             return counts[task]["sec_e"] + counts[task]["sec_w"]
         return counts[task]["pq_e"] + counts[task]["pq_w"]
 
+    def passed_or_blank(task, attempted_key, category):
+        if attempted_key not in attempted or build_fail[task]:
+            return ""
+        passed = [r for r in applicable_rules(task, category) if r not in fired[task]]
+        return ";".join(passed)
+
     rows.append({
-        "participant": name,
-        "t1_security": count_or_blank("t1", "wolfssl", "sec"),
-        "t1_pq":       count_or_blank("t1", "wolfssl", "pq"),
-        "t1_status":   status_for("t1", "wolfssl"),
-        "t2_security": count_or_blank("t2", "botan",   "sec"),
-        "t2_pq":       count_or_blank("t2", "botan",   "pq"),
-        "t2_status":   status_for("t2", "botan"),
+        "participant":        name,
+        "t1_security":        count_or_blank("t1", "wolfssl", "sec"),
+        "t1_security_passed": passed_or_blank("t1", "wolfssl", "security"),
+        "t1_pq":              count_or_blank("t1", "wolfssl", "pq"),
+        "t1_pq_passed":       passed_or_blank("t1", "wolfssl", "pq"),
+        "t1_status":          status_for("t1", "wolfssl"),
+        "t2_security":        count_or_blank("t2", "botan", "sec"),
+        "t2_security_passed": passed_or_blank("t2", "botan", "security"),
+        "t2_pq":              count_or_blank("t2", "botan", "pq"),
+        "t2_pq_passed":       passed_or_blank("t2", "botan", "pq"),
+        "t2_status":          status_for("t2", "botan"),
     })
 
 with SUMMARY.open("w", newline="") as fh:
     w = csv.DictWriter(fh, fieldnames=[
-        "participant", "t1_security", "t1_pq", "t1_status",
-        "t2_security", "t2_pq", "t2_status",
+        "participant",
+        "t1_security", "t1_security_passed", "t1_pq", "t1_pq_passed", "t1_status",
+        "t2_security", "t2_security_passed", "t2_pq", "t2_pq_passed", "t2_status",
     ])
     w.writeheader()
     for r in rows:
@@ -303,53 +366,121 @@ if not SUMMARY.exists():
 with SUMMARY.open() as f:
     rows = list(csv.DictReader(f))
 
-# Identify participants whose build failed for each task — needed for the
-# explanatory footnote so em-dashes don't read as "not attempted".
+# ── Check catalogue, with display label, hex colour, task scope. ────────────
+# Same order will appear in every cell and in the legend.
+SECURITY_CHECKS = [
+    ("safira/security/weak-hash",                       "Weak hash",            "4E79A7", ("t1","t2")),
+    ("safira/security/weak-cipher",                     "Weak cipher",          "F28E2B", ("t1","t2")),
+    ("safira/security/cert-verify-disabled",            "Cert verify off",      "E15759", ("t1","t2")),
+    ("safira/security/hardcoded-secret",                "Hardcoded secret",     "76B7B2", ("t1","t2")),
+    ("safira/security/insecure-rng",                    "Insecure RNG",         "59A14F", ("t1","t2")),
+    ("safira/security/banned-c-function",               "Banned C func.",       "B07AA1", ("t1","t2")),
+    ("safira/security/insecure-file-perms",             "File perms",           "FF9DA7", ("t1","t2")),
+    ("safira/security/small-rsa-key",                   "Small RSA key",        "9C755F", ("t1","t2")),
+    ("safira/security/secret-in-log-or-exception",      "Secret in log",        "BC80BD", ("t1","t2")),
+    ("safira/security/rsa-pkcs1-v1-5",                  r"RSA PKCS\#1 v1.5",    "8C564B", ("t1","t2")),
+    ("safira/botan/tofu-pin-unconditional-overwrite",   "TOFU bypass",          "1F77B4", ("t2",)),
+    ("safira/botan/callbacks-verify-cert-chain-empty",  "No cert verify",       "555555", ("t2",)),
+]
+PQ_CHECKS = [
+    ("safira/wolfssl/configure-key-exchange-not-pq",    "PQ KEX (DTLS)",        "378d94", ("t1",)),
+    ("safira/wolfssl/protocol-description-not-pq",      "PQ in label",          "77b5b6", ("t1",)),
+    ("safira/botan/policy-no-pq-groups",                "PQ KEX (TLS)",         "6a408d", ("t2",)),
+    ("safira/botan/policy-pq-kex-classical-sigs",       "PQ signatures",        "9671bd", ("t2",)),
+    ("safira/security/legacy-pqc-naming",               "FIPS-203 naming",      "d1cbe5", ("t1","t2")),
+]
+
+def latex_escape(s):
+    return str(s).replace("&", r"\&").replace("_", r"\_").replace("%", r"\%")
+
+def circles_for(passed_field, task, checks):
+    """Return LaTeX with one filled disc per passed check (in catalogue order),
+    on a single line. Uses \\large bullets for visibility."""
+    passed = set(passed_field.split(";")) if passed_field else set()
+    out = []
+    for rid, _label, color, tasks in checks:
+        if task not in tasks:
+            continue
+        if rid in passed:
+            out.append(rf"\textcolor[HTML]{{{color}}}{{\large\textbullet}}")
+    return "".join(out)
+
+def cell(passed_field, status, task, checks):
+    if status == "error":
+        return r"\textemdash$^{\dagger}$"
+    if status == "pending":
+        return r"\textemdash{}"
+    rendered = circles_for(passed_field, task, checks)
+    return rendered if rendered else r"\textit{none}"
+
+# Identify build failures (used in the inline note that follows the table).
 build_failed = []
 for r in rows:
-    failed_tasks = []
-    if r["t1_status"] == "error": failed_tasks.append("Task~1")
-    if r["t2_status"] == "error": failed_tasks.append("Task~2")
-    if failed_tasks:
-        build_failed.append(f"{r['participant']} ({', '.join(failed_tasks)})")
-
+    failed = []
+    if r["t1_status"] == "error": failed.append("Task~1")
+    if r["t2_status"] == "error": failed.append("Task~2")
+    if failed:
+        build_failed.append(f"{r['participant']} ({', '.join(failed)})")
 build_failed_note = "; ".join(build_failed) if build_failed else "none"
 
+def legend_table(checks, n_cols=3):
+    """Render a `tabular` block of n_cols `<dot> <label>` pairs.
+    Bullets are \\large to match the table cells for visual consistency."""
+    rows_out = []
+    cur = []
+    for rid, label, color, tasks in checks:
+        suffix = ""
+        if tasks == ("t1",):     suffix = r"~[T1 only]"
+        elif tasks == ("t2",):   suffix = r"~[T2 only]"
+        cur.append(rf"\textcolor[HTML]{{{color}}}{{\large\textbullet}} & {label}{suffix}")
+        if len(cur) == n_cols:
+            rows_out.append(" & ".join(cur) + r" \\")
+            cur = []
+    if cur:
+        # pad incomplete row
+        while len(cur) < n_cols:
+            cur.append("&")
+        rows_out.append(" & ".join(cur) + r" \\")
+    col_spec = "@{}" + ("cl" * n_cols) + "@{}"
+    body = "\n".join(rows_out)
+    return f"\\begin{{tabular}}{{{col_spec}}}\n{body}\n\\end{{tabular}}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Table itself: clean two-level header (Task 1 / Task 2 across 2 sub-columns),
+# tighter row spacing, no embedded footnotes.
+# ─────────────────────────────────────────────────────────────────────────────
 header = r"""\begin{table}[h]
 \centering
-\caption{Static analysis findings of submitted code}
-\label{tab:participants}
-\begin{threeparttable}
-\begin{tabular}{lcccc}
+\caption{Static analysis findings on participant submissions. Each filled disc represents a CodeQL check that ran without findings on the corresponding source file; missing discs indicate checks that were violated. The colour-to-check mapping is given in the legend below the table.}
+\label{tab:codeql}
+\renewcommand{\arraystretch}{1.35}
+\setlength{\tabcolsep}{14pt}
+\begin{tabular}{l cc cc}
 \toprule
-Participant & \makecell[c]{Task 1 security \\ findings \tnote{a}} & \makecell[c]{Task 1 PQ \\ correctness \tnote{b}} & \makecell[c]{Task 2 security \\ findings \tnote{a}} & \makecell[c]{Task 2 PQ \\ correctness \tnote{b}}\\
+& \multicolumn{2}{c}{\textbf{Task 1} (WolfSSL DTLS 1.3)}
+& \multicolumn{2}{c}{\textbf{Task 2} (Botan TLS 1.3)} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+\textbf{Participant} & Security & PQ correctness & Security & PQ correctness \\
 \midrule
 """
 
 footer_template = r"""\bottomrule
 \end{tabular}
-
-\begin{tablenotes}
-\footnotesize
-\item[a] Security findings identified via CodeQL: weak cryptographic primitives (SHA-1, MD5, MD4, DES, RC4, ECB mode), disabled certificate verification (\texttt{SSL\_VERIFY\_NONE}), hardcoded keys / certificates, banned C functions (\texttt{gets}, \texttt{strcpy}, \texttt{sprintf}, \ldots), permissive file permissions on credential files, undersized RSA keys ($<2048$ bits), insecure RNG sources, RSA PKCS\#1\,v1.5 signatures, secrets logged or thrown in exceptions, and TOFU pin-store bypasses.
-\item[b] PQ correctness, evaluated via CodeQL and manual review: post-quantum or hybrid key-exchange group selected (ML-KEM, hybrid X25519+ML-KEM); post-quantum signature scheme allowed (ML-DSA, SLH-DSA); user-facing protocol description reflects the migration; pre-FIPS-203/204 algorithm names (Kyber, Dilithium, SPHINCS+) avoided. Absence of any post-quantum primitive constituted an automatic task failure.
-\item[c] \textemdash{} indicates the task was not attempted, or that the participant's submission failed to compile and CodeQL could not analyse it. Build failures: __BUILD_FAILED__.
-\end{tablenotes}
-\end{threeparttable}
 \end{table}
+
+\noindent
+\textbf{Legend --- security checks.}\\[2pt]
+__SEC_LEGEND__
+
+\medskip
+\noindent
+\textbf{Legend --- PQ correctness checks.}\\[2pt]
+__PQ_LEGEND__
+
+\medskip
+\noindent
+\textit{Note.} \textemdash{} indicates the task was not attempted by the participant, or that their submission failed to compile and CodeQL could not analyse it; in the latter case the cell is marked with a dagger~$^{\dagger}$. Build failures: __BUILD_FAILED__. Absence of any post-quantum primitive in a participant's submission constituted an automatic task failure for the corresponding cell, regardless of the security findings.
 """
-
-def latex_escape(s):
-    return str(s).replace("&", r"\&").replace("_", r"\_").replace("%", r"\%")
-
-def cell(v, status):
-    """Render a count: empty (build failed / not attempted) → em-dash, with
-    a footnote pointer iff the task's build failed."""
-    if v == "" or v is None:
-        if status == "error":
-            return r"\textemdash\tnote{c}"
-        return r"\textemdash{}"
-    return str(v)
 
 with TEX.open("w") as f:
     f.write(header)
@@ -357,12 +488,15 @@ with TEX.open("w") as f:
         pid = latex_escape(r["participant"])
         f.write(
             f"{pid} & "
-            f"{cell(r['t1_security'], r['t1_status'])} & "
-            f"{cell(r['t1_pq'],       r['t1_status'])} & "
-            f"{cell(r['t2_security'], r['t2_status'])} & "
-            f"{cell(r['t2_pq'],       r['t2_status'])} \\\\\n"
+            f"{cell(r['t1_security_passed'], r['t1_status'], 't1', SECURITY_CHECKS)} & "
+            f"{cell(r['t1_pq_passed'],       r['t1_status'], 't1', PQ_CHECKS)} & "
+            f"{cell(r['t2_security_passed'], r['t2_status'], 't2', SECURITY_CHECKS)} & "
+            f"{cell(r['t2_pq_passed'],       r['t2_status'], 't2', PQ_CHECKS)} \\\\\n"
         )
-    f.write(footer_template.replace("__BUILD_FAILED__", build_failed_note))
+    f.write(footer_template
+            .replace("__SEC_LEGEND__",   legend_table(SECURITY_CHECKS, n_cols=3))
+            .replace("__PQ_LEGEND__",    legend_table(PQ_CHECKS,       n_cols=3))
+            .replace("__BUILD_FAILED__", build_failed_note))
 
 print(f"  wrote {TEX} ({len(rows)} rows)")
 PYEOF
