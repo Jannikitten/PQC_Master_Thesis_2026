@@ -14,7 +14,7 @@ import cpp
  * Core/infrastructure/.
  */
 predicate isParticipantFile(File f) {
-  f.getRelativePath().regexpMatch(".*/Core/infrastructure/crypto/.*")
+  f.getRelativePath().regexpMatch("(.*/)?Core/infrastructure/crypto/.*")
 }
 
 /** True if `e` is lexically inside the body of `f`. */

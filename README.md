@@ -29,18 +29,17 @@
 - [Project Structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
 - [Dependencies](#dependencies)
-- [Security Disclaimer](#security-disclaimer)
+- [Security Disclaimer](#️-security-disclaimer)
 
 ---
 
 ## Overview
 
-Safira is a real-time peer-to-peer chat application built as part of a Master's Thesis on Post-Quantum Cryptography. It contains two programming tasks for participants to replace classical key exchange and signature schemes with their NIST-standardised post-quantum equivalents:
+Safira is a real-time peer-to-peer chat application built as part of a Master's Thesis on Post-Quantum Cryptography. It contains two programming tasks for participants to replace classical key exchange schemes with their NIST-standardised post-quantum equivalents:
 
 | Classical | Post-Quantum Replacement | Standard |
 |-----------|--------------------------|----------|
 | ECDH / RSA (key exchange) | **ML-KEM** (Kyber) | NIST FIPS 203 |
-| ECDSA / RSA (signatures) | **ML-DSA** (Dilithium) | NIST FIPS 204 |
 | TLS 1.3 | **DTLS 1.3** | RFC 9147 |
 
 The GUI is rendered with **ImGui + Vulkan**. Cryptography is provided by **wolfSSL** and **Botan 3**.
@@ -52,7 +51,7 @@ The GUI is rendered with **ImGui + Vulkan**. Cryptography is provided by **wolfS
 ```
 ┌─────────────────────┐     DTLS 1.3      ┌─────────────────────┐
 │   SafiraClient      │◄─────────────────►│   SafiraServer      │
-│   (ImGui + Vulkan)  │   ML-KEM + ML-DSA │   (ImGui + Vulkan)  │
+│   (ImGui + Vulkan)  │      ML-KEM       │   (ImGui + Vulkan)  │
 └─────────────────────┘                   └─────────────────────┘
          │                                          │
          └──────────────────┬───────────────────────┘
@@ -330,7 +329,7 @@ Safira was developed solely as an academic proof-of-concept for a Master's Thesi
 
 **Do not use this application to transmit sensitive, private, or confidential information under any circumstances.** The post-quantum algorithms used (ML-KEM, ML-DSA) are standards-track, but correct algorithm selection alone does not make an implementation secure.
 
-This project exists to demonstrate concepts, not to provide guarantees.
+This project exists as part of a qualitative study, not to provide guarantees.
 
 ---
 

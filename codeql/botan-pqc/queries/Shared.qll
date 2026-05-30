@@ -36,7 +36,7 @@ predicate isBotanPolicySubclass(Class c) {
  * positives in the participant's grading output.
  */
 predicate isInParticipantCode(MemberFunction f) {
-  f.getFile().getRelativePath().regexpMatch(".*/Core/infrastructure/crypto/.*")
+  f.getFile().getRelativePath().regexpMatch("(.*/)?Core/infrastructure/crypto/.*")
 }
 
 /**

@@ -7,7 +7,7 @@ submissions:
 |---|---|---|
 | Task 1 — WolfSSL key-exchange | [`wolfssl-pqc/`](wolfssl-pqc/) | Did Task 1 migrate the DTLS key-exchange to PQ? |
 | Task 2 — Botan P2P TLS 1.3 | [`botan-pqc/`](botan-pqc/) | Did Task 2 fill every TODO with PQ-secure TLS 1.3? |
-| Security hygiene | [`security/`](security/) | Common cryptographic / security antipatterns regardless of task. |
+| Security vulnerability | [`security/`](security/) | Common cryptographic / security antipatterns regardless of task. |
 
 The first two packs flag **task gaps** (PQ algorithm not chosen, TODO
 not filled in, callback not wired). The security pack flags
